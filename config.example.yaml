@@ -1,0 +1,8 @@
+# GTM-MCP Configuration
+# Copy to ~/.gtm-mcp/config.yaml and fill in your API keys
+
+apollo_api_key: ""          # Apollo.io API key
+smartlead_api_key: ""       # SmartLead API key
+getsales_api_key: ""        # GetSales API key
+getsales_team_id: ""        # GetSales Team ID
+apify_proxy_password: ""    # Apify proxy password (optional, for scraping)

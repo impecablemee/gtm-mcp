@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "gtm": {
+      "command": "gtm-mcp",
+      "autoApprove": [
+        "get_config",
+        "list_projects",
+        "load_data",
+        "blacklist_check",
+        "apollo_get_taxonomy",
+        "apollo_estimate_cost",
+        "scrape_website",
+        "smartlead_list_campaigns",
+        "smartlead_list_accounts",
+        "getsales_list_profiles"
+      ]
+    }
+  }
+}
