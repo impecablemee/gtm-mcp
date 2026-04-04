@@ -1,188 +1,379 @@
-"""Apollo.io API tools — company search, people search, enrichment, taxonomy."""
+"""Apollo.io API tools — company search, people search, enrichment, taxonomy.
+
+Credit costs:
+  /mixed_companies/search    — 1 credit per page (max 100/page)
+  /mixed_people/api_search   — FREE (partial profile, max 25/page)
+  /people/bulk_match         — 1 credit per verified email
+  /organizations/bulk_enrich — 1 credit per company returned (max 10/call)
+
+CRITICAL FILTER RULES:
+  - organization_industry_tag_ids and q_organization_keyword_tags CANNOT be combined.
+    Apollo ANDs across filter types — combining narrows results and breaks pagination.
+    Use ONE or the OTHER per request. Run parallel streams for both.
+  - 1 keyword per request, 1 industry_tag_id per request for maximum coverage.
+  - Locations + employee_ranges + funding_stages CAN be combined with either.
+"""
+import asyncio
+import json
+import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
 BASE_URL = "https://api.apollo.io/api/v1"
-RATE_LIMIT = 0.3  # 300ms between calls
+RATE_LIMIT_INTERVAL = 0.3
+MAX_RETRIES = 3
+BACKOFF_WAITS = [30, 60, 120]
+
+_last_call_time = 0.0
+_tags_path = Path(__file__).parent.parent / "reference" / "industry_tags.json"
+_taxonomy_path = Path(__file__).parent.parent / "reference" / "apollo_taxonomy.json"
+_cache_path = Path(__file__).parent.parent / "reference" / "apollo_taxonomy_cache.json"
+
+
+async def _rate_limit():
+    global _last_call_time
+    now = time.monotonic()
+    elapsed = now - _last_call_time
+    if elapsed < RATE_LIMIT_INTERVAL:
+        await asyncio.sleep(RATE_LIMIT_INTERVAL - elapsed)
+    _last_call_time = time.monotonic()
+
+
+async def _api_call(
+    api_key: str, method: str, endpoint: str,
+    payload: dict | None = None, skip_rate_limit: bool = False,
+) -> dict | None:
+    headers = {"X-Api-Key": api_key, "Content-Type": "application/json", "Cache-Control": "no-cache"}
+
+    for attempt in range(MAX_RETRIES + 1):
+        if not skip_rate_limit:
+            await _rate_limit()
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                if method == "POST":
+                    resp = await client.post(f"{BASE_URL}{endpoint}", json=payload, headers=headers)
+                else:
+                    resp = await client.get(f"{BASE_URL}{endpoint}", headers=headers)
+
+                if resp.status_code == 429:
+                    if attempt < MAX_RETRIES:
+                        wait = BACKOFF_WAITS[attempt]
+                        logger.warning(f"Apollo 429 on {endpoint}, retry {attempt+1} in {wait}s")
+                        await asyncio.sleep(wait)
+                        continue
+                    return None
+
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Apollo {endpoint}: HTTP {e.response.status_code}")
+            return None
+        except Exception as e:
+            logger.error(f"Apollo {endpoint}: {e}")
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(BACKOFF_WAITS[min(attempt, len(BACKOFF_WAITS) - 1)])
+                continue
+            return None
+    return None
 
 
 async def apollo_search_companies(
-    api_key: str,
-    filters: dict,
-    page: int = 1,
-    per_page: int = 100,
+    api_key: str, filters: dict, page: int = 1, per_page: int = 100,
 ) -> dict:
     """Search Apollo for companies. 1 credit per page.
 
-    CRITICAL: Pass only 1 keyword OR 1 industry_tag_id per call.
-    Never combine multiple — it distorts Apollo's ranking.
-    """
-    payload = {
-        "page": page,
-        "per_page": per_page,
-    }
-    if "q_organization_keyword_tags" in filters:
-        payload["q_organization_keyword_tags"] = filters["q_organization_keyword_tags"]
-    if "organization_industry_tag_ids" in filters:
-        payload["organization_industry_tag_ids"] = filters["organization_industry_tag_ids"]
-    if "organization_locations" in filters:
-        payload["organization_locations"] = filters["organization_locations"]
-    if "organization_num_employees_ranges" in filters:
-        payload["organization_num_employees_ranges"] = filters["organization_num_employees_ranges"]
-    if "organization_latest_funding_stage_cd" in filters:
-        payload["organization_latest_funding_stage_cd"] = filters["organization_latest_funding_stage_cd"]
+    ENFORCED: Cannot combine q_organization_keyword_tags with organization_industry_tag_ids.
+    Apollo ANDs them — kills results. Use separate calls (parallel streams).
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{BASE_URL}/mixed_companies/search",
-            json=payload,
-            headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    Pass EITHER keywords OR industry_tag_ids, plus optional: locations, employee_ranges, funding.
+    """
+    has_keywords = bool(filters.get("q_organization_keyword_tags"))
+    has_tags = bool(filters.get("organization_industry_tag_ids"))
+
+    if has_keywords and has_tags:
+        return {
+            "success": False,
+            "error": "CANNOT combine q_organization_keyword_tags with organization_industry_tag_ids in same request. "
+                     "Apollo ANDs them — destroys results. Make SEPARATE calls: "
+                     "one with keywords only, one with industry_tag_ids only. Run in parallel.",
+        }
+
+    payload: dict[str, Any] = {"page": page, "per_page": min(per_page, 100)}
+
+    if has_tags:
+        payload["organization_industry_tag_ids"] = filters["organization_industry_tag_ids"]
+    elif has_keywords:
+        payload["q_organization_keyword_tags"] = filters["q_organization_keyword_tags"]
+
+    if filters.get("organization_locations"):
+        payload["organization_locations"] = filters["organization_locations"]
+    if filters.get("organization_num_employees_ranges"):
+        payload["organization_num_employees_ranges"] = filters["organization_num_employees_ranges"]
+    if filters.get("organization_latest_funding_stage_cd"):
+        payload["organization_latest_funding_stage_cd"] = filters["organization_latest_funding_stage_cd"]
+    if filters.get("q_organization_name"):
+        payload["q_organization_name"] = filters["q_organization_name"]
+
+    data = await _api_call(api_key, "POST", "/mixed_companies/search", payload)
+    if not data:
+        return {"success": False, "error": "Apollo API call failed"}
 
     companies = []
-    for org in data.get("organizations", []):
+    for org in data.get("organizations") or data.get("accounts") or []:
         companies.append({
-            "domain": (org.get("primary_domain") or "").lower().strip(),
+            "domain": (org.get("primary_domain") or org.get("domain") or "").lower().strip(),
             "name": org.get("name", ""),
             "industry": org.get("industry", ""),
             "industry_tag_id": org.get("industry_tag_id", ""),
             "employee_count": org.get("estimated_num_employees"),
-            "country": org.get("country", ""),
-            "city": org.get("city", ""),
+            "employee_range": org.get("employee_range", ""),
+            "country": org.get("country") or org.get("organization_country", ""),
+            "city": org.get("city") or org.get("organization_city", ""),
+            "state": org.get("state") or org.get("organization_state", ""),
             "linkedin_url": org.get("linkedin_url", ""),
             "website_url": org.get("website_url", ""),
             "founded_year": org.get("founded_year"),
-            "keywords": org.get("keywords", []),
+            "keywords": org.get("keywords") or org.get("keyword_tags") or [],
             "apollo_id": org.get("id", ""),
+            "phone": org.get("phone") or (org.get("primary_phone") or {}).get("number"),
+            "revenue": org.get("estimated_annual_revenue"),
+            "sic_codes": org.get("sic_codes"),
+            "naics_codes": org.get("naics_codes"),
+            "headcount_6m_growth": org.get("headcount_6m_growth"),
+            "headcount_12m_growth": org.get("headcount_12m_growth"),
+            "languages": org.get("languages"),
         })
 
+    pagination = data.get("pagination", {})
     return {
         "success": True,
         "companies": companies,
-        "total_entries": data.get("pagination", {}).get("total_entries", 0),
+        "total_entries": pagination.get("total_entries", 0),
+        "total_pages": pagination.get("total_pages", 0),
         "page": page,
         "per_page": per_page,
+        "credits_used": 1,
     }
 
 
 async def apollo_search_people(
     api_key: str,
-    organization_domains: list[str],
-    person_titles: list[str] | None = None,
+    domain: str,
     person_seniorities: list[str] | None = None,
     per_page: int = 25,
 ) -> dict:
-    """Search Apollo for people at given companies. FREE — no credits."""
-    payload = {
-        "q_organization_domains_list": organization_domains,
-        "page": 1,
-        "per_page": per_page,
-    }
-    if person_titles:
-        payload["person_titles"] = person_titles
-    if person_seniorities:
-        payload["person_seniorities"] = person_seniorities
+    """Search Apollo for people at a company. FREE — no credits.
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{BASE_URL}/mixed_people/search",
-            json=payload,
-            headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    Returns candidates with person IDs for enrichment via apollo_enrich_people.
+    Filters has_email=true only. Default seniorities: owner→founder→c_suite→vp→head→director.
+    """
+    seniorities = person_seniorities or ["owner", "founder", "c_suite", "vp", "head", "director"]
+
+    payload = {
+        "q_organization_domains": domain,
+        "page": 1,
+        "per_page": min(per_page, 25),
+        "person_seniorities": seniorities,
+    }
+
+    data = await _api_call(api_key, "POST", "/mixed_people/api_search", payload, skip_rate_limit=True)
+    if not data:
+        return {"success": False, "error": "Apollo people search failed"}
 
     people = []
     for p in data.get("people", []):
+        if not p.get("has_email"):
+            continue
         people.append({
-            "name": p.get("name", ""),
+            "id": p.get("id", ""),
+            "name": f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
+            "first_name": p.get("first_name", ""),
+            "last_name": p.get("last_name", ""),
             "title": p.get("title", ""),
             "seniority": p.get("seniority", ""),
-            "email": p.get("email", ""),
+            "has_email": True,
             "linkedin_url": p.get("linkedin_url", ""),
-            "organization_name": p.get("organization", {}).get("name", ""),
-            "apollo_id": p.get("id", ""),
+            "organization_name": (p.get("organization") or {}).get("name", ""),
         })
 
-    return {"success": True, "people": people, "total": data.get("pagination", {}).get("total_entries", 0)}
+    return {
+        "success": True,
+        "people": people,
+        "total": data.get("pagination", {}).get("total_entries", 0),
+        "domain": domain,
+        "credits_used": 0,
+    }
 
 
-async def apollo_enrich_company(api_key: str, domain: str) -> dict:
-    """Enrich a single company by domain. 1 credit."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{BASE_URL}/organizations/enrich",
-            json={"domain": domain},
-            headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    org = data.get("organization", {})
-    return {"success": True, "company": org}
+async def apollo_enrich_people(api_key: str, person_ids: list[str]) -> dict:
+    """Enrich people by Apollo person IDs via bulk_match. 1 credit per verified email.
 
-
-async def apollo_bulk_enrich_people(api_key: str, details: list[dict]) -> dict:
-    """Enrich people to get verified emails. 1 credit per person.
-    details: [{"first_name": "...", "last_name": "...", "organization_name": "...", "domain": "..."}]
+    Returns ONLY verified emails. Also extracts organization data (industry_tag_id)
+    which can be used to auto-extend the industry taxonomy.
     """
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            f"{BASE_URL}/people/bulk_match",
-            json={"details": details, "reveal_personal_emails": False},
-            headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    if not person_ids:
+        return {"success": True, "matches": [], "credits_used": 0}
+
+    details = [{"id": pid} for pid in person_ids]
+    data = await _api_call(api_key, "POST", "/people/bulk_match", {
+        "details": details, "reveal_personal_emails": True,
+    })
+    if not data:
+        return {"success": False, "error": "Apollo bulk_match failed"}
 
     matches = []
-    for m in data.get("matches", []):
-        if m and m.get("email"):
-            matches.append({
-                "name": m.get("name", ""),
-                "email": m.get("email", ""),
-                "title": m.get("title", ""),
-                "linkedin_url": m.get("linkedin_url", ""),
-                "organization": m.get("organization", {}),
+    credits = 0
+    new_tag_ids = {}
+
+    for match in data.get("matches", []):
+        if not match:
+            continue
+        credits += 1
+
+        if match.get("email_status") != "verified":
+            continue
+
+        org = match.get("organization") or {}
+        if org.get("industry_tag_id") and org.get("industry"):
+            new_tag_ids[org["industry"].lower()] = org["industry_tag_id"]
+
+        phone = None
+        if match.get("phone_numbers"):
+            phone = match["phone_numbers"][0].get("sanitized_number")
+
+        matches.append({
+            "email": match.get("email", ""),
+            "email_verified": True,
+            "first_name": match.get("first_name", ""),
+            "last_name": match.get("last_name", ""),
+            "name": f"{match.get('first_name', '')} {match.get('last_name', '')}".strip(),
+            "title": match.get("title", ""),
+            "seniority": match.get("seniority", ""),
+            "linkedin_url": match.get("linkedin_url", ""),
+            "phone": phone,
+            "org_industry": org.get("industry", ""),
+            "org_industry_tag_id": org.get("industry_tag_id", ""),
+            "org_country": org.get("country", ""),
+            "org_city": org.get("city", ""),
+            "org_employee_count": org.get("estimated_num_employees"),
+            "org_funding_stage": org.get("latest_funding_stage", ""),
+        })
+
+    if new_tag_ids:
+        _extend_industry_tags(new_tag_ids)
+
+    return {
+        "success": True,
+        "matches": matches,
+        "credits_used": credits,
+        "new_industry_tags_discovered": new_tag_ids if new_tag_ids else None,
+    }
+
+
+async def apollo_enrich_companies(api_key: str, domains: list[str]) -> dict:
+    """Bulk enrich companies by domain. Max 10 per call, 1 credit per company.
+
+    Returns full company data including industry_tag_id.
+    Auto-extends industry taxonomy with discovered tag_ids.
+    """
+    if not domains:
+        return {"success": True, "companies": [], "credits_used": 0}
+
+    all_companies = []
+    total_credits = 0
+    new_tag_ids = {}
+
+    for i in range(0, len(domains), 10):
+        batch = domains[i:i + 10]
+        data = await _api_call(api_key, "POST", "/organizations/bulk_enrich", {"domains": batch})
+        if not data:
+            continue
+
+        for org in data.get("organizations") or []:
+            total_credits += 1
+
+            if org.get("industry_tag_id") and org.get("industry"):
+                new_tag_ids[org["industry"].lower()] = org["industry_tag_id"]
+
+            all_companies.append({
+                "domain": (org.get("primary_domain") or org.get("domain") or "").lower().strip(),
+                "name": org.get("name", ""),
+                "industry": org.get("industry", ""),
+                "industry_tag_id": org.get("industry_tag_id", ""),
+                "employee_count": org.get("estimated_num_employees"),
+                "country": org.get("country", ""),
+                "city": org.get("city", ""),
+                "state": org.get("state", ""),
+                "founded_year": org.get("founded_year"),
+                "linkedin_url": org.get("linkedin_url", ""),
+                "website_url": org.get("website_url", ""),
+                "keywords": org.get("keywords") or [],
+                "sic_codes": org.get("sic_codes"),
+                "naics_codes": org.get("naics_codes"),
+                "apollo_id": org.get("id", ""),
+                "revenue": org.get("estimated_annual_revenue"),
+                "headcount_6m_growth": org.get("headcount_6m_growth"),
+                "headcount_12m_growth": org.get("headcount_12m_growth"),
+                "latest_funding_stage": org.get("latest_funding_stage", ""),
+                "latest_funding_amount": org.get("latest_funding_amount"),
             })
-    return {"success": True, "matches": matches}
+
+    if new_tag_ids:
+        _extend_industry_tags(new_tag_ids)
+
+    return {
+        "success": True,
+        "companies": all_companies,
+        "credits_used": total_credits,
+        "new_industry_tags_discovered": new_tag_ids if new_tag_ids else None,
+    }
 
 
 def apollo_get_taxonomy() -> dict:
-    """Return hardcoded Apollo industry taxonomy. No API call."""
+    """Return Apollo industry taxonomy with tag_ids + employee ranges.
+
+    Loads from reference files:
+    - industry_tags.json: 84 industry → hex tag_id mapping (from production DB)
+    - apollo_taxonomy.json: full industry list (112 names)
+    - apollo_taxonomy_cache.json: keywords + industries with metadata
+
+    For the organization_industry_tag_ids API filter, you MUST use the hex tag_ids,
+    NOT the industry name strings. Use the industry_tags mapping.
+    """
+    industry_tags = {}
+    if _tags_path.exists():
+        industry_tags = json.loads(_tags_path.read_text())
+
+    industries = list(industry_tags.keys())
+
+    if not industries and _taxonomy_path.exists():
+        data = json.loads(_taxonomy_path.read_text())
+        industries = data.get("industries", [])
+
+    keywords = []
+    if _cache_path.exists():
+        try:
+            cache = json.loads(_cache_path.read_text())
+            keywords = list(cache.get("keywords", {}).keys())[:500]
+        except Exception:
+            pass
+
     return {
         "success": True,
-        "industries": [
-            "accounting", "airlines/aviation", "alternative dispute resolution",
-            "alternative medicine", "animation", "apparel & fashion",
-            "architecture & planning", "arts & crafts", "automotive",
-            "aviation & aerospace", "banking", "biotechnology", "broadcast media",
-            "building materials", "business supplies & equipment", "capital markets",
-            "chemicals", "civic & social organization", "civil engineering",
-            "commercial real estate", "computer & network security", "computer games",
-            "computer hardware", "computer networking", "computer software",
-            "construction", "consumer electronics", "consumer goods",
-            "consumer services", "cosmetics", "dairy", "defense & space", "design",
-            "e-learning", "education management", "electrical/electronic manufacturing",
-            "entertainment", "environmental services", "events services",
-            "executive office", "facilities services", "farming", "financial services",
-            "food & beverages", "food production", "fund-raising", "furniture",
-            "gambling & casinos", "glass ceramics & concrete",
-            "government administration", "government relations", "graphic design",
-            "health wellness & fitness", "higher education", "hospital & health care",
-            "hospitality", "human resources", "import & export",
-            "individual & family services", "industrial automation",
-            "information services", "information technology & services", "insurance",
-            "international affairs", "international trade & development", "internet",
-            "investment banking", "investment management",
-        ],
-        "employee_ranges": [
-            "1,10", "11,50", "51,200", "201,500",
-            "501,1000", "1001,5000", "5001,10000", "10001,",
-        ],
+        "industry_tags": industry_tags,
+        "industries": industries,
+        "industries_count": len(industries),
+        "tag_ids_count": len(industry_tags),
+        "employee_ranges": ["1,10", "11,50", "51,200", "201,500", "501,1000", "1001,5000", "5001,10000", "10001,"],
+        "keywords_sample": keywords[:50],
+        "keywords_total": len(keywords),
+        "note": "Use industry_tags[name] to get hex tag_id for organization_industry_tag_ids filter. "
+                "Keywords are free-text — generate any with LLM, no validation needed.",
     }
 
 
@@ -194,15 +385,40 @@ def apollo_estimate_cost(
     """Estimate Apollo credits needed. No API call."""
     target_companies = target_count / contacts_per_company
     companies_from_apollo = target_companies / target_rate
-    pages = int(companies_from_apollo / 60) + 1  # ~60 unique per 100 requested
+    pages = int(companies_from_apollo / 60) + 1
     search_credits = pages
     people_credits = target_count
-    total = search_credits + people_credits
+    exploration_credits = 5
+    total = search_credits + people_credits + exploration_credits
     return {
         "success": True,
         "search_credits": search_credits,
         "people_credits": people_credits,
+        "exploration_credits": exploration_credits,
         "total_credits": total,
         "total_usd": round(total * 0.01, 2),
         "estimate": f"~{total} credits (${round(total * 0.01, 2)})",
     }
+
+
+def _extend_industry_tags(new_tags: dict[str, str]):
+    """Auto-extend industry_tags.json with newly discovered tag_ids."""
+    existing = {}
+    if _tags_path.exists():
+        try:
+            existing = json.loads(_tags_path.read_text())
+        except Exception:
+            pass
+
+    updated = False
+    for name, tag_id in new_tags.items():
+        if name not in existing or existing[name] != tag_id:
+            existing[name] = tag_id
+            updated = True
+
+    if updated:
+        try:
+            _tags_path.write_text(json.dumps(existing, indent=2, sort_keys=True, ensure_ascii=False))
+            logger.info(f"Industry taxonomy extended: {len(new_tags)} tag(s) updated")
+        except Exception as e:
+            logger.warning(f"Failed to extend industry tags: {e}")

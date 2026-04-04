@@ -100,7 +100,12 @@ async def blacklist_import(file_path: str) -> dict:
 
 @mcp.tool()
 async def apollo_search_companies(filters: dict, page: int = 1, per_page: int = 100) -> dict:
-    """Search Apollo for companies. 1 credit/page. MUST use 1 keyword OR 1 industry per call."""
+    """Search Apollo for companies. 1 credit/page. Rate limited (300ms + 429 retry).
+
+    CRITICAL: Pass EITHER q_organization_keyword_tags OR organization_industry_tag_ids.
+    NEVER both — Apollo ANDs them, kills results. Use separate parallel calls.
+    Locations, employee_ranges, funding_stages CAN be combined with either.
+    """
     api_key = _config.get("apollo_api_key")
     if not api_key:
         return {"success": False, "error": "Apollo API key not configured. Run set_config."}
@@ -110,41 +115,58 @@ async def apollo_search_companies(filters: dict, page: int = 1, per_page: int = 
 
 @mcp.tool()
 async def apollo_search_people(
-    domains: list[str],
-    person_titles: list[str] | None = None,
+    domain: str,
     person_seniorities: list[str] | None = None,
+    per_page: int = 25,
 ) -> dict:
-    """Search Apollo for people at given companies. FREE — no credits."""
+    """Search Apollo for people at a company. FREE — no credits.
+
+    Returns candidates with person IDs for enrichment. Filters has_email=true.
+    Default seniorities: owner, founder, c_suite, vp, head, director.
+    """
     api_key = _config.get("apollo_api_key")
     if not api_key:
         return {"success": False, "error": "Apollo API key not configured."}
     from gtm_mcp.tools.apollo import apollo_search_people as _impl
-    return await _impl(api_key, domains, person_titles, person_seniorities)
+    return await _impl(api_key, domain, person_seniorities, per_page)
 
 
 @mcp.tool()
-async def apollo_enrich_company(domain: str) -> dict:
-    """Enrich a company by domain. 1 credit."""
+async def apollo_enrich_people(person_ids: list[str]) -> dict:
+    """Enrich people by Apollo person IDs. 1 credit per verified email.
+
+    Returns ONLY verified emails. Also returns org data (industry_tag_id)
+    which auto-extends the industry taxonomy.
+    """
     api_key = _config.get("apollo_api_key")
     if not api_key:
         return {"success": False, "error": "Apollo API key not configured."}
-    from gtm_mcp.tools.apollo import apollo_enrich_company as _impl
-    return await _impl(api_key, domain)
+    from gtm_mcp.tools.apollo import apollo_enrich_people as _impl
+    return await _impl(api_key, person_ids)
 
 
 @mcp.tool()
-async def apollo_bulk_enrich_people(details: list[dict]) -> dict:
-    """Enrich people to get verified emails. 1 credit per person."""
+async def apollo_enrich_companies(domains: list[str]) -> dict:
+    """Bulk enrich companies by domain. Max 10 per call, 1 credit per company.
+
+    Returns full company data including industry_tag_id.
+    Auto-extends industry taxonomy with discovered tag_ids.
+    """
     api_key = _config.get("apollo_api_key")
     if not api_key:
         return {"success": False, "error": "Apollo API key not configured."}
-    from gtm_mcp.tools.apollo import apollo_bulk_enrich_people as _impl
-    return await _impl(api_key, details)
+    from gtm_mcp.tools.apollo import apollo_enrich_companies as _impl
+    return await _impl(api_key, domains)
 
 
 @mcp.tool()
 async def apollo_get_taxonomy() -> dict:
-    """Get Apollo industry taxonomy (67 industries + 8 employee ranges). No API call."""
+    """Get Apollo industry taxonomy with hex tag_ids + employee ranges.
+
+    Returns 84 industry name → tag_id mappings from production data.
+    For organization_industry_tag_ids filter, use the hex tag_ids, NOT name strings.
+    Keywords are free-text — generate any with LLM, no validation needed.
+    """
     from gtm_mcp.tools.apollo import apollo_get_taxonomy as _impl
     return _impl()
 
