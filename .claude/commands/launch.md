@@ -294,54 +294,56 @@ run.rounds[]: {
 
 **Stop adding new keyword batches when 400 unique companies reached in this round.**
 
-### Streaming: scrape → classify → people (don't wait for full phase completion)
+### Scrape ALL gathered companies at once (fast batch)
 
-**pipeline_spec.md rule: every phase starts IMMEDIATELY when input is available.**
-- 1 company found in Apollo → scrape it NOW
-- 1 website scraped → classify it NOW
-- 1 target confirmed → start people extraction NOW
-
-**In practice with Claude Code**: process in overlapping mini-batches, not sequential full phases.
-
-**STREAMING LOOP** (repeat until KPI met or 400 companies processed):
+**Do NOT scrape one by one. Do NOT spawn agents for scraping.**
+Call `scrape_batch` ONCE with ALL gathered domains — it handles 100 concurrent via Apify proxy internally.
 
 ```
-MINI-BATCH (20 companies at a time):
+all_domains = ["https://" + d for d in gathered_companies.keys()]
+results = scrape_batch(all_domains, max_concurrent=100)
+→ 100 concurrent Apify residential proxy requests
+→ 3-layer fallback per URL: proxy → direct → HTTP
+→ 429/5xx auto-retried with backoff
+→ Returns ALL results in ONE tool call
+```
 
-1. SCRAPE — call scrape_batch MCP tool (50 concurrent with Apify proxy, NOT agents):
-   scrape_batch(["https://" + d for d in batch_domains], max_concurrent=50)
-   → Returns all results in one call. 3-layer fallback per URL: proxy → direct → HTTP.
-   → 429/5xx auto-retried with backoff. No agent needed — deterministic.
-   Store: company.scrape = {status, text_length, text}
+Store scrape results: `company.scrape = {status, text_length, text}`
 
-2. CLASSIFY — inline (you ARE the LLM, read company-qualification skill rules):
+This takes ~30-60 seconds for 300-400 domains. No agents, no Fetch, no per-URL tool calls.
+
+### Classify + People extraction (streaming mini-batches)
+
+After batch scrape completes, process in mini-batches of 20-30 scraped companies:
+
+```
+MINI-BATCH LOOP (repeat until KPI met):
+
+1. CLASSIFY — inline (you ARE the LLM, read company-qualification skill rules):
    For each successfully scraped company in this batch:
-   - Read scraped text, apply via negativa rules
-   - Output: is_target, confidence (0-100), segment, reasoning
+   - Read scraped text, apply via negativa rules from company-qualification skill
+   - Classify from SCRAPED TEXT ONLY — never Apollo industry label
+   - Output: is_target, confidence (0-100), segment (CAPS_SNAKE_CASE), reasoning
    - Normalize company name (strip Inc., LLC, etc.)
    Store: company.classification = {is_target, confidence, segment, reasoning}
 
-3. PEOPLE — for targets in this batch, start extraction immediately:
+2. PEOPLE — for targets in this batch, extract contacts immediately:
    For each target (is_target == true) in this mini-batch:
      apollo_search_people(domain=target.domain, person_seniorities=[...])  # FREE
      apollo_enrich_people(person_ids=[top_3])  # 1 credit/person
    Store contacts, update totals.
 
-4. KPI CHECK — after each mini-batch:
+3. KPI CHECK:
    If total_verified_contacts >= kpi.target_people → STOP, proceed to Step 6
    If credits_used >= max_credits → STOP with warning
+   Otherwise → next mini-batch of scraped companies
 
-5. SAVE — update run file after each mini-batch:
+4. SAVE — update run file after each mini-batch:
    save_data(project, "runs/{run_id}.json", {companies: {...}, contacts: [...], totals: {...}}, mode="merge")
 ```
 
-**Why inline classification (not agents)?**
-- Each mini-batch is 20 companies. You classify them as you read the scraped text.
-- Spawning agents for 20 companies adds overhead (agent startup, context loading).
-- Agents are valuable for 100+ companies. For streaming mini-batches, inline is faster.
-- You already have the company-qualification skill loaded — just apply the rules.
-
-**When to spawn classification agents instead**: If you gathered 400 companies and want to classify all at once (non-streaming mode), spawn 3-4 agents each processing ~100 companies' scraped text. Pass the text in the prompt, NOT domains to scrape.
+**CRITICAL: stop as soon as KPI met.** Do NOT classify remaining companies if you already have enough targets.
+Do NOT wait for all companies to be classified before starting people extraction.
 
 **After all mini-batches complete**, compute totals:
 ```
