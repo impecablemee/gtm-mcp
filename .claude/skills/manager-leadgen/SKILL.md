@@ -2,139 +2,286 @@
 
 Orchestrate the /leadgen pipeline as a 7-phase sequence with **exactly 2 human checkpoints** and full autonomous execution between them.
 
-**Required skills**: offer-extraction, apollo-filter-mapping, company-qualification, quality-gate, email-sequence, pipeline-state, io-state-safe, silence-protocol, resume-checkpoint
+**Read these skills as referenced by each phase**: offer-extraction, apollo-filter-mapping, company-qualification, quality-gate, email-sequence, pipeline-state, io-state-safe, resume-checkpoint
 
 ## Two Checkpoints — Nothing Else Blocks
 
 ```
-CHECKPOINT 1: Strategy Approval (before spending Apollo credits)
-  Shows: offer + filters + probe + cost estimate + KPI + accounts + sequence plan
-  User says: "proceed"
-
-  ── everything between is AUTONOMOUS ──
-
-CHECKPOINT 2: Launch Approval (before campaign goes live)  
-  Shows: campaign link + settings + leads uploaded + Google Sheet + test email sent
-  User says: "activate"
+CHECKPOINT 1 (Phase 3): Strategy Approval — before spending Apollo credits
+CHECKPOINT 2 (Phase 7): Launch Approval — before campaign goes live
 ```
 
-**No other human-blocking points.** Classification is autonomous (97% accuracy via negativa). Sequence generation is autonomous (GOD_SEQUENCE 12 rules). Keyword regeneration is autonomous (quality-gate 10 angles). The agent runs the full pipeline without asking.
+Everything else is AUTONOMOUS. No "Does this look right?", no "Approve targets?", no "Approve sequence?".
+
+---
 
 ## Session Setup
 
-1. **Detect mode** from /launch arguments:
-   - `campaign=<id_or_slug>` → **MODE 3** (append to existing campaign)
-   - `project=<slug>` → **MODE 2** (new campaign on existing project)
-   - else → **MODE 1** (fresh — full pipeline)
+### 1. Detect mode
 
-2. **Resolve project slug**:
-   - Mode 1: from website domain, project name, or user input
-   - Mode 2: from `project=` parameter → verify `load_data(project, "project.yaml")` exists
-     - Check `segment` not already used: `existing = project.get("campaigns", [])` → if any `c["segment"] == segment` → error: "Segment {segment} already has campaign {c['slug']}. Use `/launch campaign={c['slug']}` to append."
-   - Mode 3: call `find_campaign(campaign_ref)` → returns `{project, slug, data}` → project slug from result
-     - Then validate SmartLead: `smartlead_get_campaign(campaign_id)` → verify status is not STOPPED
-     - If campaign not found locally → error: "Campaign not found. Check ID/slug."
-     - If campaign STOPPED in SmartLead → error: "Campaign is stopped. Cannot append."
+```
+If campaign=<id_or_slug> in args → MODE 3 (append)
+If project=<slug> in args        → MODE 2 (new campaign)
+Else                              → MODE 1 (fresh)
+```
 
-3. Generate session_id: `leadgen-{project-slug}-{YYYYMMDD}-{HHMMSS}`
+### 2. Resolve project
 
-4. Check for existing state: `load_data(project, "state.yaml")`
-   - If state exists and not completed → invoke resume-checkpoint skill
-   - If no state → initialize state.yaml
+**Mode 1**: Derive slug from input (website domain, or slugify project name).
+```
+create_project(name)
+```
 
-5. **Initialize state.yaml based on mode:**
-   - Set `mode`: `"fresh"` (Mode 1) | `"new_campaign"` (Mode 2) | `"append"` (Mode 3)
-   - Mode 1: all 7 phases as "pending"
-   - Mode 2: `offer_extraction: "skipped"`, rest "pending"
-   - Mode 3: `offer_extraction: "skipped"`, `sequence_generation: "skipped"`, rest "pending"
-   - Set `active_campaign_slug` (Mode 3: from campaign, Mode 2: null until created)
-   - Set `active_campaign_id` (Mode 3: from campaign, Mode 2: null until created)
-   - Set `active_run_id` (new run-{NNN})
+**Mode 2**: Load existing project.
+```
+result = load_data(project_slug, "project.yaml")
+→ Verify result.data.offer_approved == true
+→ Check project.campaigns[] — if segment already exists, error:
+  "Segment X already has campaign Y. Use /launch campaign=Y to append."
+```
 
-## Data Layers (L0/L1/L2/L3)
+**Mode 3**: Look up campaign across all projects.
+```
+result = find_campaign(campaign_ref)
+→ project_slug = result.data.project
+→ campaign_data = result.data.data
+→ campaign_id = campaign_data.campaign_id
 
-| Layer | Description | Files |
-|-------|-------------|-------|
-| L0 Config | API keys, user settings | `~/.gtm-mcp/config.yaml`, `.env` |
-| L1 Directives | User-approved decisions (immutable once approved) | `project.yaml` (offer), FilterSnapshots in run file |
-| L2 Operational | Working data (can be regenerated) | `runs/run-{id}.json` (companies, scrapes, classifications, contacts) |
-| L3 Artifacts | Final outputs (versioned) | `campaigns/`, `qualified/v{N}.json` |
+validation = smartlead_get_campaign(campaign_id)
+→ If validation.data.status == "STOPPED" → error: "Campaign is stopped."
+```
 
-**Contract**: L1 decisions (approved offer, approved filters) can NEVER be overridden by L2 operations.
+### 3. Initialize state
+
+```
+state = {
+  session_id: "leadgen-{project_slug}-{YYYYMMDD}-{HHMMSS}",
+  project: project_slug,
+  pipeline: "leadgen",
+  mode: "fresh" | "new_campaign" | "append",
+  status: "running",
+  current_phase: "offer_extraction",
+  active_campaign_slug: null,  # Mode 3: from campaign_data.slug
+  active_campaign_id: null,    # Mode 3: from campaign_data.campaign_id
+  active_run_id: "run-001",
+  phase_states: {
+    offer_extraction: "pending",      # Mode 2/3: "skipped"
+    filter_generation: "pending",
+    cost_gate: "pending",
+    round_loop: "pending",
+    people_extraction: "pending",
+    sequence_generation: "pending",   # Mode 3: "skipped"
+    campaign_push: "pending"
+  },
+  started_at: "{now}",
+  last_updated: "{now}",
+  error: null,
+  completed_at: null
+}
+
+existing = load_data(project_slug, "state.yaml")
+if existing.success:
+  → Read resume-checkpoint skill and follow its algorithm
+  → May skip to a later phase
+else:
+  save_data(project_slug, "state.yaml", state)
+```
 
 ---
 
 ## Phase 1: Offer Extraction (AUTONOMOUS)
 
-**Gate in**: None (entry point)
-**Skill**: offer-extraction
-**Human gate**: NONE — result shown in Checkpoint 1
+**Human gate**: NONE
+**Skip if**: Mode 2 or 3 (offer already approved)
 
-**Mode 1 (fresh):**
-1. Determine input type:
-   - Website URL → 3-layer scraping fallback
-   - Strategy document → read file from disk
-   - Chat description → extract from conversation
-2. Extract structured offer_summary
-3. Save: `save_data(project, "project.yaml", offer_data, mode="merge")`
-4. DO NOT ask for approval — proceed to Phase 2. Offer shown in Checkpoint 1 document.
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state, current_phase: "offer_extraction",
+  phase_states: {..., offer_extraction: "in_progress"}
+})
+```
 
-On complete: update state → `phase_states.offer_extraction: "completed"`
+### Execute
 
-**Mode 2/3 (existing project):** SKIP.
-- `project_data = load_data(project, "project.yaml")`
-- Verify `offer_approved == true`
-  - If `offer_approved` is false or missing → error: "Offer not approved. Run `/launch {url}` first."
-- State already set to `offer_extraction: "skipped"`
+Read the **offer-extraction** skill. It defines the extraction schema and rules.
 
-**L1 artifact**: project.yaml with offer (becomes immutable after Checkpoint 1 approval)
+**If input is URL**:
+```
+scraped = scrape_website(url)
+```
+Then analyze `scraped.data.text` using the offer-extraction skill's schema to produce `offer_summary` JSON.
+
+**If input is file path**: Read the file from disk, then extract using the same schema.
+
+**If input is text**: Extract directly from the user's description.
+
+Apply the extraction rules from the skill: segments with CAPS_SNAKE_CASE names, 8-10 keywords per segment, target roles by offer type, employee size inference.
+
+```
+save_data(project, "project.yaml", {
+  name: project_name,
+  slug: project_slug,
+  offer: extracted_offer_summary,
+  offer_approved: false,   # becomes true at Checkpoint 1
+  campaigns: []
+}, mode="merge")
+```
+
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state, phase_states: {..., offer_extraction: "completed"}
+})
+```
+
+**Mode 2/3**: Skip. Load `project.yaml`, verify `offer_approved == true`.
+
+---
 
 ## Phase 2: Filter Generation (AUTONOMOUS)
 
-**Gate in**: offer extracted or loaded
-**Skill**: apollo-filter-mapping
-**Human gate**: NONE — result shown in Checkpoint 1
+**Human gate**: NONE
+**Runs in all modes** (but with different intelligence in Mode 3)
 
-**All modes run this phase**, but with different intelligence:
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state, current_phase: "filter_generation",
+  phase_states: {..., filter_generation: "in_progress"}
+})
+```
 
-1. Call `apollo_get_taxonomy()` for industry tag_id mapping
-2. Read filter_intelligence.json for seed recommendations (if exists)
-3. **Mode 3 extra**: Load `keyword_leaderboard` from previous runs for this campaign.
-   Use top performers (by `quality_score`) as HIGH-PRIORITY seeds.
-   Exclude exhausted keywords (all pages fetched in previous runs).
-4. Generate filters: industries (tag_ids), keywords (80-100), locations, sizes
-5. Create FilterSnapshot fs-001 in run file (Mode 3: `parent_id` = last snapshot from previous run)
-6. Probe: 1 request per top-3 tag_ids + top-3 keywords (**6 credits max, same as magnum-opus**)
-   - Mode 3: "Seeded from {N} proven keywords. {M} exhausted keywords excluded."
-7. DO NOT ask for approval — proceed to Phase 3.
+### Execute
 
-On complete: update state → `phase_states.filter_generation: "completed"`
+Read the **apollo-filter-mapping** skill.
 
-**L1 artifact**: FilterSnapshot in run file (becomes immutable after Checkpoint 1 approval)
+**Step 1**: Get Apollo taxonomy.
+```
+taxonomy = apollo_get_taxonomy()
+→ 84 industries with hex tag_ids
+```
+
+**Step 2**: Generate filters from offer + taxonomy.
+
+Using the offer's segments, target_roles, and the apollo-filter-mapping skill's rules:
+- Pick 2-3 industry tag_ids (SPECIFIC > BROAD)
+- Generate 20-30 keywords per segment (product names, not generic terms)
+- Map locations to Apollo format
+- Map employee sizes to Apollo ranges
+
+**Step 3** (Mode 3 only): Load keyword intelligence from previous runs.
+```
+for run_id in campaign_data.run_ids:
+  prev_run = load_data(project, f"runs/{run_id}.json")
+  → Extract keyword_leaderboard → use top performers as seeds
+  → Exclude exhausted keywords
+```
+
+**Step 4**: Create FilterSnapshot and run probe (6 credits max).
+
+```
+# Probe top 3 industries (1 request each)
+for tag_id in industry_tag_ids[:3]:
+  apollo_search_companies(filters={
+    organization_industry_tag_ids: [tag_id],
+    organization_locations: locations,
+    organization_num_employees_ranges: employee_ranges
+  })
+
+# Probe top 3 keywords (1 request each)  
+for keyword in keywords[:3]:
+  apollo_search_companies(filters={
+    q_organization_keyword_tags: [keyword],
+    organization_locations: locations,
+    organization_num_employees_ranges: employee_ranges
+  })
+```
+
+Collect probe results: companies per filter, total_available, unique companies.
+
+**Step 5**: Create run file with probe data.
+```
+save_data(project, "runs/run-001.json", {
+  run_id: "run-001",
+  project: project_slug,
+  campaign_id: campaign_id or null,
+  campaign_slug: campaign_slug or null,
+  mode: "fresh" | "append",
+  status: "running",
+  created_at: "{now}",
+  kpi: {target_people: kpi, max_people_per_company: 3, max_credits: max_cost},
+  probe: {breakdown: [...], companies_from_probe: N, credits_used: 6},
+  filter_snapshots: [fs_001],
+  rounds: [], requests: [], companies: {}, contacts: [], iterations: [],
+  totals: {rounds_completed:0, total_credits:6, ...}
+})
+```
+
+**Step 6**: Estimate cost.
+```
+cost = apollo_estimate_cost(target_count=kpi, contacts_per_company=3)
+```
+
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state, active_run_id: "run-001",
+  phase_states: {..., filter_generation: "completed"}
+})
+```
+
+---
 
 ## Phase 3: Cost Gate — CHECKPOINT 1 (Strategy Approval)
 
-**Gate in**: filters generated, probe complete
-**Human gate**: **YES — this is the ONLY pre-gathering approval**
+**Human gate**: **YES — the ONLY pre-gathering approval**
 
-Build and present the **Strategy Approval Document** combining Phases 1+2+cost estimate:
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state, current_phase: "cost_gate",
+  phase_states: {..., cost_gate: "in_progress"}
+})
+```
+
+### Execute
+
+Also resolve email accounts and blacklist here (before presenting the document):
 
 ```
+accounts = smartlead_list_accounts()
+→ If user provided account hint, filter by name/email substring
+→ If not, show available accounts and ask which to use
+```
+
+```
+# Blacklist
+Mode 1: Ask user for blacklist sources (SmartLead campaigns, Google Sheets, or "skip")
+Mode 2: Auto-import from all existing project campaigns:
+  for campaign in project.campaigns:
+    existing = smartlead_export_leads(campaign.campaign_id)
+    blacklist_add(existing.data.domains)
+Mode 3: Auto-dedup (handled in Phase 4 via Cross-Run Dedup Protocol)
+```
+
+Save approval document:
+```
 save_data(project, "pipeline-config.yaml", {
-  project, mode, source: "apollo", destination: "smartlead",
-  offer: {product, segments, target_roles, exclusions},
-  filters: {keywords, industries, geo, size, funding},
-  probe: {breakdown, total_available, credits_used: 6},
-  cost_estimate: {search, enrichment, total, max_cap},
-  kpi: {target_contacts, contacts_per_company, existing_leads, delta},
-  email_accounts: [{id, email, name}],
-  sequence: "GOD_SEQUENCE (4 steps, Day 0/3/7/14)" | "from document",
-  blacklist: {sources, domains_count},
+  project: project_name,
+  mode: mode,
+  filters: {segments, geo, keywords, industries, size, funding},
+  probe: {breakdown, total_available, credits_used},
+  cost_estimate: cost.data,
+  kpi: {target: kpi, per_company: 3, max_cost: max_cost},
+  email_accounts: selected_accounts,
+  sequence: "GOD_SEQUENCE" or "from_document",
+  blacklist: {domains_count: N},
   status: "awaiting_approval"
 })
 ```
 
-**Present to user — ALL params in one view:**
+### Present to user (ALL in one view):
 
 ```
 Strategy Document:
@@ -142,15 +289,14 @@ Strategy Document:
   OFFER:
     Product: {primary_offer}
     Segments: {segments}
-    Target Roles: {target_roles.primary}
+    Target Roles: {primary_roles}
     Exclusions: {exclusion_list}
 
   FILTERS:
-    Keywords: {N} generated (top 3 probed)
-    Industries: {industry_names} ({N} tag_ids)
+    Keywords: {N} generated
+    Industries: {names} ({N} tag_ids)
     Geo: {locations}
-    Size: {employee_range} employees
-    Funding: {funding_stages} (prioritization)
+    Size: {employee_range}
 
   PROBE (6 credits):
     {keyword_1}: {total} companies
@@ -158,224 +304,364 @@ Strategy Document:
     {keyword_3}: {total} companies
     {industry_1}: {total} companies
     {industry_2}: {total} companies
-    → {unique} unique companies from probe
+    → {unique} unique from probe
 
   COST:
-    Estimated: ~{N} search + ~{M} enrichment = ~{T} credits (${usd})
+    Estimated: ~{total} credits (${usd})
     Max cap: {max_cost} credits (default 200)
 
-  KPI: {target} contacts, {per_company}/company
-  Email Accounts: {N} selected ({hint})
-  Sequence: GOD_SEQUENCE (4 steps)
+  KPI: {target} contacts, 3/company
+  Email Accounts: {N} selected
+  Sequence: GOD_SEQUENCE (4-5 steps)
   Blacklist: {N} domains
 
   Proceed?
 ```
 
-**User responses:**
-- "proceed" / "yes" / "go" → set `offer_approved: true`, advance. **ALL subsequent phases are autonomous.**
-- Feedback ("wrong roles", "add REGTECH", "too expensive") → re-extract offer and/or regenerate filters, re-present document. Loop until approved.
+### Wait for user
 
-On approve: update state → `phase_states.cost_gate: "completed"`, status → "running"
+- "proceed" → set `offer_approved: true` on project.yaml, continue
+- Feedback → re-extract offer / regenerate filters / adjust, re-present
 
-**CRITICAL**: Never spend credits beyond the 6 probe requests without this checkpoint passing.
+### Update state
+```
+save_data(project, "project.yaml", {...project, offer_approved: true}, mode="merge")
+save_data(project, "state.yaml", {
+  ...state, phase_states: {..., cost_gate: "completed"}, status: "running"
+})
+```
+
+---
 
 ## Phase 4: Round Loop (AUTONOMOUS)
 
-**Gate in**: strategy approved (Checkpoint 1 passed)
-**Skills**: pipeline-state (round loop algorithm), company-qualification, quality-gate
 **Human gate**: NONE — fully autonomous
 
-1. Create run file: `save_data(project, "runs/run-{id}.json", initial_state)`
-   - Set `campaign_id`, `campaign_slug`, `mode` from mode detection
-   - **Mode 3**: Build dedup sets per Cross-Run Dedup Protocol (pipeline-state skill):
-     - Load companies from all previous runs for this campaign → `seen_domains`
-     - Export existing campaign leads → `seen_emails`
-     - Record `dedup_baseline` in run file
-2. Follow the round loop algorithm from pipeline-state skill EXACTLY:
-   - GATHER: 1 keyword per request + 1 tag_id per request, all parallel, funded+unfunded
-   - SCRAPE: 100 concurrent, starts streaming as companies arrive
-   - CLASSIFY: 100 concurrent, via negativa, starts as scrapes complete
-   - PEOPLE: 20 concurrent, starts as targets confirmed
-   - KPI CHECK: enough contacts for `kpi.target_people`?
-     (Mode 1/2: default 100. Mode 3: the DELTA, e.g. 98 if user said kpi=200 and campaign has 102.)
-3. If target_rate < expected → **autonomously** regenerate keywords (quality-gate skill, 10 angles) → next round
-4. If KPI not met after keywords exhausted → **autonomously** try next regeneration cycle (max 5)
-5. After each round: update run file + state.yaml
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state, current_phase: "round_loop",
+  phase_states: {..., round_loop: "in_progress"}
+})
+```
 
-On complete (KPI met or exhausted): update state → `phase_states.round_loop: "completed"`
+### Mode 3 dedup setup
+```
+seen_domains = set()
+seen_emails = set()
 
-**State saved continuously**: run file updated after each round. If pipeline crashes mid-round, resume from last completed round.
+for run_id in campaign_data.run_ids:
+  prev_run = load_data(project, f"runs/{run_id}.json")
+  seen_domains.update(prev_run.data.companies.keys())
+
+existing_leads = smartlead_export_leads(campaign_id)
+seen_emails = {lead.email for lead in existing_leads.data.leads}
+seen_domains.update(existing_leads.data.domains)
+```
+
+### Execute round loop
+
+Read the **pipeline-state** skill for the full round loop algorithm. Read the **company-qualification** skill for classification rules.
+
+**For each keyword** (1 per request, all in parallel):
+```
+apollo_search_companies(filters={
+  q_organization_keyword_tags: [keyword],
+  organization_locations: [...],
+  organization_num_employees_ranges: [...]
+})
+```
+
+**For each industry tag_id** (1 per request, all in parallel):
+```
+apollo_search_companies(filters={
+  organization_industry_tag_ids: [tag_id],
+  ...same location/size filters
+})
+```
+
+Dedup results by domain. Skip domains in `seen_domains`. Stop at 400 unique companies.
+
+**For each company** (parallel, batches of 10-20):
+```
+scraped = scrape_website(company.domain)
+```
+
+**Classify each scraped company** using company-qualification skill rules (via negativa — Claude does this inline, no tool call). Produce `is_target`, `confidence`, `segment`, `reasoning`.
+
+Update run file after each batch:
+```
+save_data(project, "runs/run-001.json", updated_run, mode="merge")
+```
+
+**If target_rate low** → read quality-gate skill, autonomously regenerate keywords with next angle, run another round. Max 5 regeneration cycles.
+
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state, phase_states: {..., round_loop: "completed"}
+})
+```
+
+---
 
 ## Phase 5: People Extraction (AUTONOMOUS)
 
-**Gate in**: round_loop completed
-**Skill**: pipeline-state (people extraction section)
 **Human gate**: NONE
 
-1. For each target company: search people (FREE) → enrich (1 credit/person)
-2. Retry logic: if <3 verified, try next candidates (max 3 rounds, 12 credits/company)
-3. Priority: owner > founder > c_suite > vp > head > director
-4. KPI check after EACH contact: stop immediately when target met
-5. Update run file continuously
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state, current_phase: "people_extraction",
+  phase_states: {..., people_extraction: "in_progress"}
+})
+```
 
-On KPI met: update state → `phase_states.people_extraction: "completed"`
+### Execute
+
+For each target company (parallel, batches of 5-10):
+
+**Step 1 (FREE)**:
+```
+people = apollo_search_people(
+  domain=company.domain,
+  person_seniorities=["c_suite", "vp", "head", "director"]
+)
+```
+
+**Step 2 (1 credit per person)**:
+```
+enriched = apollo_enrich_people(person_ids=[...top matches])
+→ Extract verified emails
+→ If <3 verified, retry with next candidates (max 3 rounds, 12 credits/company)
+```
+
+Build contact objects: email, name, title, seniority, company_domain, company_name_normalized, segment.
+
+**Mode 3**: Skip contacts where email is in `seen_emails`.
+
+**KPI check after each batch**: Stop immediately when `total_verified_contacts >= kpi.target_people`.
+
+Save contacts to run file and project:
+```
+save_data(project, "runs/run-001.json", {contacts: all_contacts, ...}, mode="merge")
+save_data(project, "contacts.json", all_contacts, mode="write")
+```
+
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state, phase_states: {..., people_extraction: "completed"}
+})
+```
+
+---
 
 ## Phase 6: Sequence Generation (AUTONOMOUS)
 
-**Gate in**: people extraction completed, KPI met
-**Skill**: email-sequence
 **Human gate**: NONE — GOD_SEQUENCE applied automatically
+**Skip if**: Mode 3 (sequence already on campaign)
 
-**Mode 1 and 2:**
-1. If user provided sequence in document → use it (already extracted in Phase 1)
-2. Otherwise → generate 4-5 step sequence following 12-rule GOD_SEQUENCE checklist
-3. Apply segment-specific angle from offer
-4. Save: `save_data(project, "sequences.json", sequence_data)`
-5. DO NOT ask for approval — proceed to Phase 7
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state, current_phase: "sequence_generation",
+  phase_states: {..., sequence_generation: "in_progress"}
+})
+```
 
-On complete: update state → `phase_states.sequence_generation: "completed"`
+### Execute
 
-**Mode 3 (append):** SKIP. Sequence already set on the campaign.
-- State already set to `sequence_generation: "skipped"`
+Read the **email-sequence** skill. It defines the 12-rule GOD_SEQUENCE checklist.
+
+If the user's input document contained sequences → use those (already extracted in Phase 1).
+
+Otherwise, generate 4-5 step sequence following the 12 rules:
+- Personalization in every email ({{first_name}}, {{company_name}}, {{city}})
+- A/B subjects on Email 1
+- ≤120 words per email
+- Reply-thread subjects (Emails 2+ have empty subjects)
+- `<br>` for line breaks
+- SmartLead variables only
+
+```
+save_data(project, "sequences.json", {steps: generated_steps})
+```
+
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state, phase_states: {..., sequence_generation: "completed"}
+})
+```
+
+---
 
 ## Phase 7: Campaign Push + Launch Approval — CHECKPOINT 2
 
-**Gate in**: sequence ready (Mode 1/2) or people extraction completed (Mode 3)
-**Skills**: SmartLead tools, Google Sheets tools
-**Human gate**: **YES — this is the ONLY pre-launch approval**
+**Human gate**: **YES — the ONLY pre-launch approval**
 
-### Step A: Build campaign (AUTONOMOUS — no user input)
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state, current_phase: "campaign_push",
+  phase_states: {..., campaign_push: "in_progress"}
+})
+```
 
-**Mode 1 and 2 (create new campaign):**
-1. `smartlead_create_campaign(project, name, sending_account_ids, country, segment)` → DRAFT
-2. `smartlead_set_sequence(project, campaign_slug, campaign_id, steps)`
-3. `smartlead_add_leads(campaign_id, leads)` — normalized names + segment/city custom fields
-4. Update tracking:
-   - campaign.yaml: `run_ids: [run_id], total_leads_pushed: N`
-   - project.yaml: add campaign to `campaigns[]` index
-   - run file: populate `campaign` field
-5. `user_email` from `get_config()` → `user_email` field. If not set, ask user.
-   `smartlead_send_test_email(campaign_id, user_email)` — user checks inbox
-6. If Google Sheets configured:
-   `sheets_export_contacts(project, campaign_slug)` — creates sheet with reasoning columns, shared with user
+### Step A: Build campaign (autonomous)
 
-**Mode 3 (append to existing campaign):**
-1. SKIP campaign creation — already exists
-2. SKIP sequence — already set
-3. `smartlead_add_leads(campaign_id, new_deduped_leads)`
-4. Update tracking:
-   - campaign.yaml: append `run_id` to `run_ids`, increment `total_leads_pushed`
-   - run file: populate `campaign` field with push stats
-5. `save_data(project, "contacts.json", new_deduped_leads, mode="append")`
-6. If Google Sheets configured:
-   `sheets_export_contacts(project, campaign_slug, existing_sheet_id)` — append to existing sheet
+**Mode 1 and 2** — create new campaign:
+```
+campaign = smartlead_create_campaign(
+  project=project_slug,
+  name="{Segment} — {Geo}",
+  sending_account_ids=selected_account_ids,
+  country=geo_country_code,
+  segment=segment_name
+)
+campaign_id = campaign.data.campaign_id
+campaign_slug = campaign.data.slug
 
-### Step B: Present for activation (CHECKPOINT 2)
+smartlead_set_sequence(
+  project=project_slug,
+  campaign_slug=campaign_slug,
+  campaign_id=campaign_id,
+  steps=sequence_steps
+)
+```
+
+**Mode 3** — skip creation, campaign already exists.
+
+### Step B: Upload contacts
+```
+leads = [{
+  email: contact.email,
+  first_name: contact.name.split(" ")[0],
+  last_name: contact.name.split(" ")[1],
+  company_name: contact.company_name_normalized,
+  custom_fields: {segment: contact.segment, city: contact.city}
+} for contact in verified_contacts]
+
+smartlead_add_leads(campaign_id=campaign_id, leads=leads)
+```
+
+### Step C: Update tracking
+```
+# Update campaign.yaml
+save_data(project, f"campaigns/{campaign_slug}/campaign.yaml", {
+  ...campaign_data, run_ids: [..., run_id], total_leads_pushed: N
+})
+
+# Update project.yaml campaigns index (Mode 1/2 only)
+save_data(project, "project.yaml", {
+  ...project, campaigns: [..., {slug, campaign_id, segment, country, status: "DRAFT"}]
+}, mode="merge")
+
+# Update run file
+save_data(project, "runs/run-001.json", {
+  ...run, campaign_id, campaign_slug,
+  campaign: {campaign_id, leads_pushed: N, pushed_at: "{now}"}
+}, mode="merge")
+```
+
+### Step D: Send test email
+```
+user_email = get_config().configured.user_email
+# If not set, ask user for their email
+smartlead_send_test_email(campaign_id=campaign_id, test_email=user_email)
+```
+
+### Step E: Export to Google Sheet (if configured)
+```
+# Only if GOOGLE_SERVICE_ACCOUNT_JSON is set
+sheet = sheets_export_contacts(project=project_slug, campaign_slug=campaign_slug)
+# Returns sheet_url with target_confidence + target_reasoning columns
+```
+
+### Step F: Present for activation (CHECKPOINT 2)
 
 **Mode 1 and 2:**
 ```
 Campaign Ready (DRAFT):
-  Name: {Segment} — {Geo}
-  SmartLead: https://app.smartlead.ai/app/email-campaigns-v2/{id}/analytics
+  SmartLead: https://app.smartlead.ai/app/email-campaigns-v2/{campaign_id}/analytics
 
-  Settings: plain text ✓, no tracking ✓, 40% followup ✓, {schedule}
-  Accounts: {N} assigned ({account_list})
-  Sequence: {N} steps set (Day {cadence}, A/B on Email 1)
+  Settings: plain text, no tracking, 40% followup, {timezone}
+  Accounts: {N} assigned
+  Sequence: {N} steps (A/B on Email 1)
 
-  Contacts: {N} verified → uploaded to SmartLead
-  Google Sheet: {sheet_url} (shared with {user_email}, includes target reasoning)
+  Contacts: {N} verified → uploaded
+  Google Sheet: {sheet_url}
 
   Test email sent to {user_email} — check your inbox.
 
-  Cost: {search} search + {enrichment} enrichment = {total} credits (${usd})
-  Stats: {companies} companies → {targets} targets ({rate}%) → {contacts} contacts
+  Cost: {search} + {enrichment} = {total} credits
+  Stats: {companies} → {targets} targets ({rate}%) → {contacts} contacts
 
   Type "activate" to start sending.
 ```
 
-**Mode 3:**
+**Mode 3** (campaign already ACTIVE):
 ```
-Contacts Added to Campaign:
+Contacts Added:
   Campaign: {name} (ID: {campaign_id})
-  SmartLead: https://app.smartlead.ai/app/email-campaigns-v2/{id}/analytics
-
-  NEW: {N} contacts pushed (deduped against {existing} existing)
-  TOTAL: {total} contacts in campaign
-  Dedup: {companies_skipped} companies skipped, {emails_skipped} emails skipped
-  Google Sheet: {sheet_url} (updated with new contacts)
-
-  Cost: {total} credits (${usd})
-
-  Campaign is ACTIVE — new leads will enter the sending queue automatically.
-  {or: Type "activate" to start sending.}
+  NEW: {N} contacts (deduped against {existing})
+  TOTAL: {total} in campaign
+  New leads entering sending queue automatically.
 ```
 
-### Step C: Activation
+### Step G: Activation
 
-- "activate" / "launch" → `smartlead_activate_campaign(campaign_id, "I confirm")`
-- On activate: update state → `phase_states.campaign_push: "completed"`, `status: "completed"`
+Wait for "activate":
+```
+smartlead_activate_campaign(campaign_id=campaign_id, confirm="I confirm")
+```
+
+### Update state
+```
+save_data(project, "state.yaml", {
+  ...state,
+  phase_states: {..., campaign_push: "completed"},
+  status: "completed",
+  completed_at: "{now}"
+})
+```
 
 ---
 
 ## Phase Skip Matrix
 
-| Phase | Mode 1 (Fresh) | Mode 2 (New Campaign) | Mode 3 (Append) | Human Gate |
-|-------|:-:|:-:|:-:|:-:|
+| Phase | Mode 1 | Mode 2 | Mode 3 | Human Gate |
+|-------|:------:|:------:|:------:|:----------:|
 | 1. Offer Extraction | AUTO | SKIP | SKIP | no |
-| 2. Filter Generation | AUTO | AUTO (new segment) | AUTO (seeded) | no |
-| 3. Cost Gate (Strategy Approval) | **CHECKPOINT 1** | **CHECKPOINT 1** | **CHECKPOINT 1** | **YES** |
+| 2. Filter Generation | AUTO | AUTO | AUTO (seeded) | no |
+| 3. Cost Gate | **CHECKPOINT 1** | **CHECKPOINT 1** | **CHECKPOINT 1** | **YES** |
 | 4. Round Loop | AUTO | AUTO | AUTO + dedup | no |
 | 5. People Extraction | AUTO | AUTO | AUTO + dedup | no |
 | 6. Sequence Generation | AUTO | AUTO | SKIP | no |
-| 7. Campaign Push | CREATE → **CHECKPOINT 2** | CREATE → **CHECKPOINT 2** | ADD → **CHECKPOINT 2** | **YES** |
-
-## State Update Pattern
-
-**Before each phase**:
-```
-current_phase = "{phase_name}"
-phase_states.{phase_name} = "in_progress"
-last_updated = "{now}"
-→ save_data(project, "state.yaml", state, mode="write")
-```
-
-**After each phase**:
-```
-phase_states.{phase_name} = "completed"
-last_updated = "{now}"
-→ save_data(project, "state.yaml", state, mode="write")
-```
-
-**On error**:
-```
-phase_states.{phase_name} = "failed"
-error = "{error_message}"
-status = "failed"
-→ save_data(project, "state.yaml", state, mode="write")
-→ Report to user: what failed, what's saved, recovery options
-```
+| 7. Campaign Push | CREATE → **CP2** | CREATE → **CP2** | ADD → **CP2** | **YES** |
 
 ## Resume Logic
 
 On pipeline start, BEFORE Phase 1:
 
-1. `load_data(project, "state.yaml")` → check for existing state
-2. If state exists:
-   - status == "completed" → "Pipeline already completed. Start new run?"
-   - status == "failed" → show error, ask "Retry {failed_phase} or start fresh?"
-   - status == "running"/"paused" → show progress, ask "Resume from {current_phase}?"
-3. On resume: skip all "completed" and "skipped" phases, pick up from first pending/in_progress/failed
-4. On start fresh: archive old state, initialize new
+```
+existing = load_data(project, "state.yaml")
+```
+
+If state exists:
+- `status == "completed"` → "Pipeline already completed. Start new run?"
+- `status == "failed"` → show error, "Retry {failed_phase} or start fresh?"
+- `status == "running"/"paused"` → skip all "completed" and "skipped" phases, resume from first pending/in_progress/failed
 
 ## Recovery from Phase Failures
 
 | Phase | On Failure | Recovery |
 |-------|-----------|----------|
-| offer_extraction | Scrape failed or extraction incomplete | Retry with different URL or manual input |
-| filter_generation | Generation failed | Retry or manual filter specification |
-| cost_gate | User declined | Adjust filters to reduce cost, re-present Checkpoint 1 |
-| round_loop | Apollo rate limited or credits exhausted | Wait and retry, or reduce scope |
-| people_extraction | Enrichment failures | Retry failed companies, skip permanently failed |
+| offer_extraction | Scrape failed | Retry with different URL or manual input |
+| filter_generation | Generation failed | Retry or manual filters |
+| cost_gate | User declined | Adjust filters, re-present |
+| round_loop | Apollo rate limited | Wait and retry, or reduce scope |
+| people_extraction | Enrichment failures | Retry failed, skip permanently failed |
 | sequence_generation | Generation failed | Retry with different angle |
 | campaign_push | SmartLead API error | Retry (handles "Plan expired!" bug) |
