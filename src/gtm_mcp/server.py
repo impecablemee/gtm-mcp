@@ -1,4 +1,4 @@
-"""GTM-MCP Server — 38 thin tools, zero LLM calls. stdio transport via FastMCP."""
+"""GTM-MCP Server — 39 thin tools, zero LLM calls. stdio transport via FastMCP."""
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -248,10 +248,27 @@ async def apollo_estimate_cost(
 
 @mcp.tool()
 async def scrape_website(url: str) -> dict:
-    """Scrape a website and return cleaned text. No credits."""
+    """Scrape a website and return cleaned text. No credits.
+
+    3-layer fallback: Apify proxy → direct fetch → HTTP fallback.
+    Retries 429/5xx with exponential backoff.
+    """
     proxy = _config.get("apify_proxy_password")
     from gtm_mcp.tools.scraping import scrape_website as _impl
     return await _impl(url, apify_proxy_password=proxy)
+
+
+@mcp.tool()
+async def scrape_batch(urls: list[str], max_concurrent: int = 50) -> dict:
+    """Scrape many URLs in parallel with concurrency pool. No credits.
+
+    50 concurrent by default (Apify residential proxy).
+    MUCH faster than calling scrape_website one by one.
+    Use this for batch scraping in the pipeline — pass all domains at once.
+    """
+    proxy = _config.get("apify_proxy_password")
+    from gtm_mcp.tools.scraping import scrape_batch as _impl
+    return await _impl(urls, apify_proxy_password=proxy, max_concurrent=max_concurrent)
 
 
 # ─── SmartLead Tools ──────────────────────────────────────────────────────────

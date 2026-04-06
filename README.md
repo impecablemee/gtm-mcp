@@ -150,7 +150,7 @@ Full pipeline from scratch. If `filter_intelligence.json` has data from similar 
 ## Architecture
 
 ```
-Your AI Agent ──stdio──► gtm-mcp server (38 tools, 0 LLM calls)
+Your AI Agent ──stdio──► gtm-mcp server (39 tools, 0 LLM calls)
                               │
                     ┌─────────┼─────────┐
                     ▼         ▼         ▼

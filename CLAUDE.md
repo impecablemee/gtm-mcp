@@ -117,7 +117,7 @@ See `.env.example` for the full variable list.
   settings.json
 .mcp.json
 src/gtm_mcp/
-  server.py          # 38 tools via FastMCP (stdio)
+  server.py          # 39 tools via FastMCP (stdio)
   config.py          # ~/.gtm-mcp/config.yaml
   workspace.py       # File-based storage (write/merge/append/versioned)
   tools/             # apollo.py, smartlead.py, getsales.py, scraping.py

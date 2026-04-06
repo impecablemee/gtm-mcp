@@ -308,10 +308,10 @@ run.rounds[]: {
 ```
 MINI-BATCH (20 companies at a time):
 
-1. SCRAPE — call scrape_website MCP tool directly (NOT agents, NOT Fetch):
-   scrape_website("https://" + domain_1)   # 15-20 in parallel
-   scrape_website("https://" + domain_2)
-   ...
+1. SCRAPE — call scrape_batch MCP tool (50 concurrent with Apify proxy, NOT agents):
+   scrape_batch(["https://" + d for d in batch_domains], max_concurrent=50)
+   → Returns all results in one call. 3-layer fallback per URL: proxy → direct → HTTP.
+   → 429/5xx auto-retried with backoff. No agent needed — deterministic.
    Store: company.scrape = {status, text_length, text}
 
 2. CLASSIFY — inline (you ARE the LLM, read company-qualification skill rules):
