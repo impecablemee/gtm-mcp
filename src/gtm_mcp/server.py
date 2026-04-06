@@ -337,22 +337,35 @@ async def campaign_push(
     sequence_steps: list[dict],
     leads_file: str,
     test_email: str = "",
+    run_id: str = "",
 ) -> dict:
     """Atomic SmartLead campaign setup — ONE tool call does everything.
 
     Creates campaign (DRAFT) → sets sequence → uploads ALL leads from file → sends test email.
-    100% deterministic. Zero LLM needed. Replaces 4+ separate tool calls.
+    Also updates campaign.yaml (run_ids, total_leads_pushed) and run file (campaign data).
+    100% deterministic. Zero LLM needed.
 
     leads_file: path to JSON file with leads array (relative to project or absolute).
-    Each lead: {email, first_name, last_name, company_name, custom_fields: {segment, city}}
+    run_id: links campaign to run file (updates run.campaign + campaign.run_ids).
     """
     from gtm_mcp.tools.campaign_push import campaign_push as _impl
     return await _impl(
         project, campaign_name, sending_account_ids, country, segment,
-        sequence_steps, leads_file, test_email,
+        sequence_steps, leads_file, test_email, run_id=run_id,
         config=_config, workspace=_workspace,
     )
 
+
+
+@mcp.tool()
+async def pipeline_compute_leaderboard(project: str, run_id: str) -> dict:
+    """Compute keyword + industry leaderboard from run data. Zero LLM.
+
+    For each keyword/industry: unique companies, targets, target rate, quality_score.
+    Saves to run file's keyword_leaderboard. Used by Mode 3 for seeding.
+    """
+    from gtm_mcp.tools.pipeline import pipeline_compute_leaderboard as _impl
+    return await _impl(project, run_id, workspace=_workspace)
 
 
 @mcp.tool()
@@ -380,15 +393,15 @@ async def pipeline_gather_and_scrape(
     max_companies: int = 400,
     scrape_concurrent: int = 100,
     max_pages_per_stream: int = 5,
+    project: str = "",
+    run_id: str = "",
 ) -> dict:
     """Atomic gather + scrape pipeline — ONE tool call, full streaming inside.
 
     Fires all Apollo searches in parallel (1 keyword/industry per request).
     As domains arrive from Apollo, immediately queues them for scraping (100 concurrent Apify).
-    Returns all companies with scraped text — ready for agent classification.
-
-    This replaces calling apollo_search_companies + scrape_batch separately.
-    Streaming happens INSIDE the tool via asyncio — no round-trip overhead.
+    Auto-saves companies + requests + round data to run file (if project + run_id provided).
+    Returns scraped_texts dict for classification agent prompts.
 
     Typical: 300-400 companies gathered + scraped in 30-90 seconds.
     """
@@ -396,10 +409,11 @@ async def pipeline_gather_and_scrape(
     return await _impl(
         keywords, industry_tag_ids, locations, employee_ranges,
         funding_stages=funding_stages,
+        project=project, run_id=run_id,
         max_companies=max_companies,
         scrape_concurrent=scrape_concurrent,
         max_pages_per_stream=max_pages_per_stream,
-        config=_config,
+        config=_config, workspace=_workspace,
     )
 
 

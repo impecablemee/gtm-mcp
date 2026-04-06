@@ -18,6 +18,7 @@ async def campaign_push(
     sequence_steps: list[dict],
     leads_file: str,
     test_email: str = "",
+    run_id: str = "",
     *,
     config=None,
     workspace=None,
@@ -104,10 +105,24 @@ async def campaign_push(
         )
         test_sent = test_result.get("success", False)
 
-    # 5. Update campaign.yaml with lead count
+    # 5. Update campaign.yaml with lead count + run link
     campaign_data["total_leads_pushed"] = total_uploaded
-    campaign_data["run_ids"] = []  # caller updates this
+    campaign_data["run_ids"] = [run_id] if run_id else []
     workspace.save(project, f"campaigns/{campaign_slug}/campaign.yaml", campaign_data)
+
+    # 6. Update run file with campaign data (if run_id provided)
+    if run_id:
+        run_path = f"runs/{run_id}.json"
+        run_data = workspace.load(project, run_path)
+        if run_data:
+            run_data["campaign_id"] = campaign_id
+            run_data["campaign_slug"] = campaign_slug
+            run_data["campaign"] = {
+                "campaign_id": campaign_id,
+                "leads_pushed": total_uploaded,
+                "pushed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            workspace.save(project, run_path, run_data)
 
     return {
         "success": True,

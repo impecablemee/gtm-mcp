@@ -29,7 +29,10 @@ async def pipeline_gather_and_scrape(
     scrape_concurrent: int = 100,
     max_pages_per_stream: int = 5,
     *,
+    project: str = "",
+    run_id: str = "",
     config=None,
+    workspace=None,
 ) -> dict:
     """Atomic gather + scrape pipeline. One tool call, full streaming inside.
 
@@ -226,11 +229,50 @@ async def pipeline_gather_and_scrape(
         if comp.get("scrape", {}).get("status") == "success"
     }
 
+    # Auto-save companies + requests to run file (if project + run_id provided)
+    # This ensures scrape metadata + discovery provenance persist even if agent
+    # fails to save. Classification agents later MERGE into these company records.
+    if project and run_id and workspace:
+        run_path = f"runs/{run_id}.json"
+        existing_run = workspace.load(project, run_path) or {}
+        existing_run["companies"] = response_companies
+        existing_run["requests"] = requests
+        existing_run["totals"] = {
+            **existing_run.get("totals", {}),
+            "total_api_requests": len(requests),
+            "total_credits_search": total_credits,
+            "unique_companies": len(companies),
+            "companies_scraped": sum(1 for c in companies.values() if c.get("scrape", {}).get("status") == "success"),
+        }
+        existing_run["rounds"] = existing_run.get("rounds", [])
+        if not existing_run["rounds"]:
+            existing_run["rounds"].append({})
+        existing_run["rounds"][0] = {
+            **existing_run["rounds"][0],
+            "id": "round-001",
+            "status": "completed",
+            "timestamps": {
+                "gather_started": gather_started.isoformat(),
+                "gather_completed": gather_completed.isoformat(),
+                "scrape_started": scrape_started.isoformat(),
+                "scrape_completed": scrape_completed.isoformat(),
+            },
+            "gather_phase": {"total_requests": len(requests), "unique_companies": len(companies), "credits_used": total_credits},
+            "scrape_phase": {
+                "total": len(companies),
+                "success": sum(1 for c in companies.values() if c.get("scrape", {}).get("status") == "success"),
+                "failed": sum(1 for c in companies.values() if c.get("scrape", {}).get("status") != "success"),
+                "concurrent": scrape_concurrent,
+            },
+        }
+        workspace.save(project, run_path, existing_run)
+        logger.info("Auto-saved %d companies + %d requests to %s", len(companies), len(requests), run_path)
+
     return {
         "success": True,
         "data": {
             "companies": response_companies,
-            "scraped_texts": scraped_texts,  # separate dict for classification agent prompts
+            "scraped_texts": scraped_texts,
             "requests": requests,
             "stats": {
                 "total_companies": len(companies),
@@ -246,6 +288,85 @@ async def pipeline_gather_and_scrape(
                 "scrape_seconds": (scrape_completed - scrape_started).total_seconds(),
                 "total_seconds": (completed_at - started_at).total_seconds(),
             },
+        },
+    }
+
+
+async def pipeline_compute_leaderboard(
+    project: str,
+    run_id: str,
+    *,
+    workspace=None,
+) -> dict:
+    """Compute keyword + industry leaderboard from run's request + company data.
+
+    For each keyword/industry: count unique companies, targets, target rate,
+    credits, quality_score. Saves to run file. Zero LLM.
+    """
+    import math
+    workspace = workspace or _default_workspace()
+
+    run_path = f"runs/{run_id}.json"
+    run_data = workspace.load(project, run_path)
+    if not run_data:
+        return {"success": False, "error": f"Run file {run_path} not found"}
+
+    requests = run_data.get("requests", [])
+    companies = run_data.get("companies", {})
+
+    if not requests:
+        return {"success": False, "error": "No requests tracked in run file"}
+
+    # Build per-keyword stats
+    keyword_stats: dict[str, dict] = {}
+    for req in requests:
+        key = f"{req['type']}:{req.get('filter_value', '')}"
+        if key not in keyword_stats:
+            keyword_stats[key] = {
+                "type": req["type"],
+                "filter_value": req.get("filter_value", ""),
+                "unique_companies": 0,
+                "targets": 0,
+                "credits_used": 0,
+            }
+        s = keyword_stats[key]
+        s["credits_used"] += req.get("result", {}).get("credits_used", 1)
+        s["unique_companies"] += req.get("result", {}).get("new_unique", 0)
+
+    # Count targets per keyword using company.discovery.found_by
+    for domain, comp in companies.items():
+        found_by = comp.get("discovery", {}).get("found_by", "")
+        if found_by and found_by in keyword_stats:
+            is_target = comp.get("classification", {}).get("is_target", False)
+            if is_target:
+                keyword_stats[found_by]["targets"] += 1
+
+    # Compute quality scores
+    leaderboard = []
+    for key, s in keyword_stats.items():
+        uc = s["unique_companies"]
+        targets = s["targets"]
+        credits = max(s["credits_used"], 1)
+        target_rate = targets / uc if uc > 0 else 0
+        quality_score = target_rate * math.log(uc + 1) / credits if uc > 0 else 0
+
+        leaderboard.append({
+            **s,
+            "target_rate": round(target_rate, 3),
+            "quality_score": round(quality_score, 4),
+        })
+
+    leaderboard.sort(key=lambda x: -x["quality_score"])
+
+    # Save to run file
+    run_data["keyword_leaderboard"] = leaderboard
+    workspace.save(project, run_path, run_data)
+
+    return {
+        "success": True,
+        "data": {
+            "entries": len(leaderboard),
+            "top_5": leaderboard[:5],
         },
     }
 
