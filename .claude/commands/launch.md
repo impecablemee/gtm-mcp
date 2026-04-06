@@ -179,9 +179,18 @@ Use the **apollo-filter-mapping** skill rules.
 taxonomy = apollo_get_taxonomy()
 ```
 
-**Generate filters** from offer + taxonomy:
-- Pick 2-3 industry tag_ids (SPECIFIC > BROAD)
-- Generate 20-30 keywords (product names, not generic terms)
+**If user provided example companies** (domains like "adsterra.com", "imonetize.com"):
+```
+# Enrich to discover keywords + industry_tag_ids used by similar companies
+enriched = apollo_enrich_companies(example_domains)
+→ Extract: industry, industry_tag_id, keywords from each
+→ Use as HIGH-PRIORITY seeds for filter generation
+→ These are REAL companies in the target niche — their Apollo data is gold
+```
+
+**Generate filters** from offer + taxonomy + example seeds:
+- Pick 2-3 industry tag_ids (SPECIFIC > BROAD, informed by example enrichment)
+- Generate 20-30 keywords (product names, not generic terms, seeded from examples)
 - Map locations and employee sizes
 
 **Probe (6 credits max):**
@@ -260,11 +269,12 @@ Show: "Found {N} accounts matching '{hint}': {top emails}. Using these."
  - Campaign names or IDs to blacklist (e.g. 'ES Fintech Q1', '3070919')
  - 'skip' if this is your first campaign for this segment"
 
-If user provides campaign names/IDs:
-  → smartlead_list_campaigns() to find matching campaigns
-  → For each campaign: smartlead_export_leads(campaign_id) → extract domains
-  → blacklist_add(all_domains)
-  → Show: "Blacklisted {N} domains from {M} campaigns."
+If user provides campaign names/IDs/URLs:
+  → Extract campaign_id from SmartLead URL if provided:
+    "https://app.smartlead.ai/app/email-campaign/3137079/analytics" → campaign_id = 3137079
+  → smartlead_export_leads(campaign_id) → extract domains + emails
+  → blacklist_add(domains, source="smartlead_campaign", campaign_name=campaign_name)
+  → Show: "Blacklisted {N} domains from campaign {name}."
 
 If user provides Google Sheet URL:
   → Extract sheet_id from URL
@@ -713,14 +723,30 @@ save_data(project, "state.yaml", {
 
 **Mode 3**: SKIP — sequence already on campaign.
 
-Use **email-sequence** skill rules (12-rule GOD_SEQUENCE):
-- 4-5 steps, Day 0/3/7/14
-- ≤120 words per email
-- A/B subjects on Email 1
-- SmartLead variables: `{{first_name}}`, `{{company_name}}`, `{{city}}`, `{{signature}}`
-- `<br>` for line breaks
+**Sequence priority (first match wins):**
 
-If user's input document had sequences → use those instead.
+1. **User referenced existing SmartLead campaign** (e.g. "use sequence from campaign 3137079"):
+   ```
+   ref_campaign = smartlead_get_campaign(campaign_id)
+   sequence_steps = ref_campaign.data.sequences
+   → Use those steps directly. Already SmartLead-formatted.
+   ```
+
+2. **User's input document had sequences** → extract, validate, use.
+
+3. **User provided example companies** (e.g. "target companies like iMonetizeIt, Adsterra"):
+   ```
+   # Enrich examples to understand the niche, then generate sequence for that niche
+   enriched = apollo_enrich_companies(["imonetize.com", "adsterra.com", ...])
+   → Use enrichment data as context for sequence generation
+   ```
+
+4. **Nothing provided** → use **GOD_SEQUENCE** from email-sequence skill:
+   - 4-5 steps, Day 0/3/7/14
+   - ≤120 words per email
+   - A/B subjects on Email 1
+   - SmartLead variables: `{{first_name}}`, `{{company_name}}`, `{{city}}`, `{{signature}}`
+   - `<br>` for line breaks
 
 ```
 save_data(project, "sequences.json", {steps: sequence_steps})
