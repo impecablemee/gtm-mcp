@@ -112,6 +112,18 @@ Scrapes the website, understands the product, generates keywords, runs the pipel
 /launch "We sell payroll software for SMBs, target US and UK"
 ```
 
+### With reference campaign, blacklist, and example companies
+
+```
+/launch https://yoursite.com
+
+Blacklist this campaign: https://app.smartlead.ai/app/email-campaign/3137079/analytics
+Use the sequence from that campaign.
+Target companies like CompanyA, CompanyB, CompanyC.
+```
+
+The agent will: blacklist contacts from the reference campaign (no duplicates), reuse its email sequence, enrich example companies via Apollo to discover the best keywords for this niche, then run the full pipeline.
+
 Works with plain text too.
 
 ### Add more contacts to an existing campaign
