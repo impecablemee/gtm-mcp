@@ -432,14 +432,15 @@ result = pipeline_gather_and_scrape(
 **This is the magnum-opus streaming pattern implemented as one MCP tool.**
 
 The result contains:
-- `data.companies`: {domain: {name, apollo_data, scrape: {status, text, text_length}}}
+- `data.companies`: {domain: {name, apollo_data, discovery, scrape: {status, text_length}}} — NO full text
+- `data.scraped_texts`: {domain: text} — separate dict, used for classification agent prompts
 - `data.requests`: [{type, filter_value, funded, page, result: {raw, new_unique, credits}}]
 - `data.stats`: {gather_seconds, scrape_seconds, total_seconds, total_credits}
 
-Save to run file:
+**CRITICAL: Save companies WITH scrape metadata to run file immediately.**
 ```
 save_data(project, "runs/{run_id}.json", {
-  companies: result.data.companies,
+  companies: result.data.companies,   # includes scrape: {status, text_length} per company
   requests: result.data.requests,
   rounds: [{
     id: "round-001",
@@ -682,18 +683,29 @@ enriched = apollo_enrich_people(person_ids=[top_3_ids])
 
 **Side effect**: `apollo_enrich_people` may return `industry_tag_id` → auto-extends taxonomy.
 
-**Save contacts incrementally** — after each batch of enrichments:
+**Save contacts — CRITICAL: save to BOTH contacts.json AND run file.**
+
+Test Run #1 and #2 both failed here — contacts saved to contacts.json but NOT to run.contacts[].
+
 ```
-save_data(project, "runs/{run_id}.json", {
-  contacts: [...new_contacts_from_this_batch],
-  totals: {contacts_extracted: N, total_credits_people: N, total_credits: N}
-}, mode="merge")
+# After ALL people extraction is done (not incrementally — avoids merge issues):
+
+# 1. Save to contacts.json (the primary contacts file)
+save_data(project, "contacts.json", all_contacts, mode="write")
+
+# 2. Save to run file — load current, update contacts + totals, write back
+current_run = load_data(project, "runs/{run_id}.json")
+current_run.data.contacts = all_contacts
+current_run.data.totals.contacts_extracted = len(all_contacts)
+current_run.data.totals.kpi_met = len(all_contacts) >= kpi_target
+current_run.data.totals.total_credits_people = people_credits
+current_run.data.totals.total_credits = search_credits + people_credits
+save_data(project, "runs/{run_id}.json", current_run.data, mode="write")
 ```
 
-**When KPI met**, save everything:
+**Do NOT use mode="merge" for contacts — it deep-merges dicts, not arrays.** Load the full run, update fields, write back with mode="write".
+
 ```
-save_data(project, "contacts.json", all_contacts, mode="write")
-save_data(project, "runs/{run_id}.json", {totals: {kpi_met: true}}, mode="merge")
 save_data(project, "state.yaml", {
   ...current_state,
   current_phase: "sequence_generation",
