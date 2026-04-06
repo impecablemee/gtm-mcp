@@ -215,6 +215,35 @@ Show: "Found {N} accounts matching '{hint}': {top emails}. Using these."
 
 **This is a HARD REQUIREMENT. Do NOT proceed to Checkpoint 1 without account selection from the user.**
 
+**Resolve blacklist — MANDATORY, ask user if not in args:**
+
+**NEVER skip blacklist. ALWAYS ask the user about existing campaigns to exclude.**
+
+```
+# Ask the user BEFORE showing the strategy document:
+"Do you have any existing SmartLead campaigns for this segment that I should blacklist?
+ This prevents contacting people you've already reached out to.
+ Options:
+ - Campaign names or IDs to blacklist (e.g. 'ES Fintech Q1', '3070919')
+ - 'skip' if this is your first campaign for this segment"
+
+If user provides campaign names/IDs:
+  → smartlead_list_campaigns() to find matching campaigns
+  → For each campaign: smartlead_export_leads(campaign_id) → extract domains
+  → blacklist_add(all_domains)
+  → Show: "Blacklisted {N} domains from {M} campaigns."
+
+If user provides Google Sheet URL:
+  → Extract sheet_id from URL
+  → sheets_read(sheet_id) → extract domain/email column
+  → blacklist_add(domains)
+
+If user says "skip":
+  → No blacklist. Show: "No blacklist applied."
+```
+
+**This is a HARD REQUIREMENT. Do NOT proceed to Checkpoint 1 without blacklist confirmation from the user.**
+
 **Create run file with ALL required fields:**
 ```
 save_data(project, "runs/run-001.json", {
