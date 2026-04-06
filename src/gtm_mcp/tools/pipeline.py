@@ -250,6 +250,55 @@ async def pipeline_gather_and_scrape(
     }
 
 
+async def pipeline_save_contacts(
+    project: str,
+    run_id: str,
+    contacts: list[dict],
+    search_credits: int = 0,
+    people_credits: int = 0,
+    *,
+    workspace=None,
+) -> dict:
+    """Deterministic save: contacts to BOTH contacts.json AND run file.
+
+    Also updates run totals (credits, kpi_met). One tool call, no LLM needed.
+    Fixes the persistent bug where contacts were in contacts.json but not run file.
+    """
+    import json
+    workspace = workspace or _default_workspace()
+
+    # 1. Save contacts.json
+    workspace.save(project, "contacts.json", contacts)
+
+    # 2. Load run file, update contacts + totals, write back
+    run_path = f"runs/{run_id}.json"
+    run_data = workspace.load(project, run_path)
+    if not run_data:
+        return {"success": False, "error": f"Run file {run_path} not found"}
+
+    run_data["contacts"] = contacts
+    kpi_target = run_data.get("kpi", {}).get("target_people", 100)
+    run_data["totals"] = {
+        **run_data.get("totals", {}),
+        "contacts_extracted": len(contacts),
+        "kpi_met": len(contacts) >= kpi_target,
+        "total_credits_people": people_credits,
+        "total_credits": search_credits + people_credits,
+    }
+
+    workspace.save(project, run_path, run_data)
+
+    return {
+        "success": True,
+        "data": {
+            "contacts_saved": len(contacts),
+            "kpi_met": len(contacts) >= kpi_target,
+            "kpi_target": kpi_target,
+            "total_credits": search_credits + people_credits,
+        },
+    }
+
+
 def _default_config():
     from gtm_mcp.config import ConfigManager
     return ConfigManager()

@@ -182,12 +182,14 @@ async def sheets_export_contacts(
                         "reasoning": cls.get("reasoning", ""),
                     }
 
-    # Create sheet if none provided
+    # Create sheet if none provided — auto-share with user_email from config
     if not sheet_id:
         title = f"{project} — Contacts"
         if campaign_slug:
             title = f"{project} — {campaign_slug}"
-        result = await sheets_create(title, config=config)
+        # Get user email for sharing
+        user_email = config.get("user_email") or ""
+        result = await sheets_create(title, share_with=user_email, config=config)
         if not result.get("success"):
             return result
         sheet_id = result["data"]["sheet_id"]

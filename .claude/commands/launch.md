@@ -683,27 +683,20 @@ enriched = apollo_enrich_people(person_ids=[top_3_ids])
 
 **Side effect**: `apollo_enrich_people` may return `industry_tag_id` → auto-extends taxonomy.
 
-**Save contacts — CRITICAL: save to BOTH contacts.json AND run file.**
-
-Test Run #1 and #2 both failed here — contacts saved to contacts.json but NOT to run.contacts[].
+**Save contacts — use deterministic tool (not manual load→update→write).**
 
 ```
-# After ALL people extraction is done (not incrementally — avoids merge issues):
-
-# 1. Save to contacts.json (the primary contacts file)
-save_data(project, "contacts.json", all_contacts, mode="write")
-
-# 2. Save to run file — load current, update contacts + totals, write back
-current_run = load_data(project, "runs/{run_id}.json")
-current_run.data.contacts = all_contacts
-current_run.data.totals.contacts_extracted = len(all_contacts)
-current_run.data.totals.kpi_met = len(all_contacts) >= kpi_target
-current_run.data.totals.total_credits_people = people_credits
-current_run.data.totals.total_credits = search_credits + people_credits
-save_data(project, "runs/{run_id}.json", current_run.data, mode="write")
+# ONE tool call: saves to contacts.json + run file + updates totals + sets kpi_met
+pipeline_save_contacts(
+  project=project_slug,
+  run_id=run_id,
+  contacts=all_contacts,
+  search_credits=search_credits,
+  people_credits=people_credits
+)
 ```
 
-**Do NOT use mode="merge" for contacts — it deep-merges dicts, not arrays.** Load the full run, update fields, write back with mode="write".
+This is deterministic — no LLM needed. Fixes the persistent bug from Run #1 and #2.
 
 ```
 save_data(project, "state.yaml", {

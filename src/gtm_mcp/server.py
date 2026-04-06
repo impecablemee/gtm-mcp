@@ -356,6 +356,21 @@ async def campaign_push(
 
 
 @mcp.tool()
+async def pipeline_save_contacts(
+    project: str, run_id: str, contacts: list[dict],
+    search_credits: int = 0, people_credits: int = 0,
+) -> dict:
+    """Deterministic save: contacts to BOTH contacts.json AND run file.
+
+    Updates run totals (credits, kpi_met). One call, no LLM needed.
+    Fixes bug where contacts were in contacts.json but missing from run file.
+    """
+    from gtm_mcp.tools.pipeline import pipeline_save_contacts as _impl
+    return await _impl(project, run_id, contacts, search_credits, people_credits,
+                       workspace=_workspace)
+
+
+@mcp.tool()
 async def pipeline_gather_and_scrape(
     keywords: list[str],
     industry_tag_ids: list[str],
