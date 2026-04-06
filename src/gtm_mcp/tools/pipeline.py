@@ -381,6 +381,120 @@ async def pipeline_compute_leaderboard(
     }
 
 
+async def pipeline_import_blacklist(
+    project: str,
+    campaign_id: int,
+    *,
+    config=None,
+    workspace=None,
+) -> dict:
+    """Export leads from SmartLead campaign + save as project-level blacklist. One call.
+
+    Deterministic. Zero LLM. Guarantees blacklist exists before pipeline_gather_and_scrape.
+    """
+    config = config or _default_config()
+    workspace = workspace or _default_workspace()
+
+    from gtm_mcp.tools.smartlead import smartlead_export_leads
+    result = await smartlead_export_leads(campaign_id, config=config)
+    if not result.get("success"):
+        return {"success": False, "error": f"Export failed: {result.get('error')}"}
+
+    leads = result["data"].get("leads", [])
+    domains = result["data"].get("domains", [])
+
+    # Save as project-level blacklist
+    now = datetime.now(timezone.utc).isoformat()
+    bl = {d: {"source": "smartlead_campaign", "campaign_id": campaign_id, "blacklisted_at": now}
+          for d in domains}
+    workspace.save(project, "blacklist.json", bl)
+
+    return {
+        "success": True,
+        "data": {
+            "campaign_id": campaign_id,
+            "leads_exported": len(leads),
+            "domains_blacklisted": len(domains),
+        },
+    }
+
+
+async def pipeline_save_intelligence(
+    project: str,
+    run_id: str,
+    *,
+    workspace=None,
+) -> dict:
+    """Save cross-run intelligence from run's keyword leaderboard. Zero LLM.
+
+    Updates ~/.gtm-mcp/filter_intelligence.json with keyword quality scores
+    and segment playbooks. Future runs start with proven keywords.
+    """
+    workspace = workspace or _default_workspace()
+
+    run_path = f"runs/{run_id}.json"
+    run_data = workspace.load(project, run_path)
+    if not run_data:
+        return {"success": False, "error": f"Run file not found"}
+
+    leaderboard = run_data.get("keyword_leaderboard", [])
+    if not leaderboard:
+        return {"success": False, "error": "No keyword_leaderboard in run file. Call pipeline_compute_leaderboard first."}
+
+    # Load or create global intelligence file
+    import json
+    intel_path = workspace.base / "filter_intelligence.json"
+    if intel_path.exists():
+        intel = json.loads(intel_path.read_text())
+    else:
+        intel = {"keyword_knowledge": {}, "segment_playbooks": {}}
+
+    # Update keyword knowledge
+    kk = intel.get("keyword_knowledge", {})
+    for entry in leaderboard:
+        key = entry.get("filter_value", "")
+        if not key:
+            continue
+        if key in kk:
+            old = kk[key]
+            old["times_used"] = old.get("times_used", 0) + 1
+            old["avg_target_rate"] = (old.get("avg_target_rate", 0) + entry.get("target_rate", 0)) / 2
+            if entry.get("quality_score", 0) > old.get("best_quality_score", 0):
+                old["best_quality_score"] = entry["quality_score"]
+        else:
+            kk[key] = {
+                "type": entry.get("type", "keyword"),
+                "times_used": 1,
+                "avg_target_rate": entry.get("target_rate", 0),
+                "best_quality_score": entry.get("quality_score", 0),
+                "unique_companies": entry.get("unique_companies", 0),
+            }
+    intel["keyword_knowledge"] = kk
+
+    # Update segment playbook
+    project_data = workspace.load(project, "project.yaml")
+    if project_data:
+        segments = project_data.get("offer", project_data).get("segments", [])
+        if segments:
+            seg_name = segments[0].get("name", "UNKNOWN") if isinstance(segments[0], dict) else str(segments[0])
+            top_keywords = [e["filter_value"] for e in leaderboard[:10] if e.get("quality_score", 0) > 0]
+            intel.setdefault("segment_playbooks", {})[seg_name] = {
+                "best_keywords": top_keywords,
+                "avg_target_rate": sum(e.get("target_rate", 0) for e in leaderboard) / max(len(leaderboard), 1),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            }
+
+    intel_path.write_text(json.dumps(intel, indent=2, ensure_ascii=False))
+
+    return {
+        "success": True,
+        "data": {
+            "keywords_updated": len(kk),
+            "segment_playbooks": list(intel.get("segment_playbooks", {}).keys()),
+        },
+    }
+
+
 async def pipeline_save_contacts(
     project: str,
     run_id: str,

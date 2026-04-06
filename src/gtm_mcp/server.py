@@ -358,6 +358,28 @@ async def campaign_push(
 
 
 @mcp.tool()
+async def pipeline_import_blacklist(project: str, campaign_id: int) -> dict:
+    """Export leads from SmartLead campaign + save as project-level blacklist.
+
+    One deterministic call. Guarantees blacklist exists before pipeline_gather_and_scrape.
+    Call this BEFORE creating the run file.
+    """
+    from gtm_mcp.tools.pipeline import pipeline_import_blacklist as _impl
+    return await _impl(project, campaign_id, config=_config, workspace=_workspace)
+
+
+@mcp.tool()
+async def pipeline_save_intelligence(project: str, run_id: str) -> dict:
+    """Save cross-run intelligence from keyword leaderboard. Zero LLM.
+
+    Updates filter_intelligence.json with keyword quality scores + segment playbooks.
+    Call after pipeline_compute_leaderboard. Future runs start with proven keywords.
+    """
+    from gtm_mcp.tools.pipeline import pipeline_save_intelligence as _impl
+    return await _impl(project, run_id, workspace=_workspace)
+
+
+@mcp.tool()
 async def pipeline_compute_leaderboard(project: str, run_id: str) -> dict:
     """Compute keyword + industry leaderboard from run data. Zero LLM.
 

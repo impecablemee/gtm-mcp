@@ -235,14 +235,24 @@ taxonomy = apollo_get_taxonomy()
 # Enrich to discover keywords + industry_tag_ids used by similar companies
 enriched = apollo_enrich_companies(example_domains)
 → Extract: industry, industry_tag_id, keywords from each
-→ Use as HIGH-PRIORITY seeds for filter generation
-→ These are REAL companies in the target niche — their Apollo data is gold
+
+# PERSIST enrichment to project.yaml seed_data (survives crash/resume)
+save_data(project, "project.yaml", {
+  seed_data: {
+    keywords: [all unique keywords from enriched companies],
+    industry_tag_ids: [all unique tag_ids],
+    source: "example_companies",
+    example_domains: example_domains
+  }
+}, mode="merge")
 ```
 
 **Generate filters** from offer + taxonomy + example seeds:
 - Pick 2-3 industry tag_ids (SPECIFIC > BROAD, informed by example enrichment)
-- Generate 20-30 keywords (product names, not generic terms, seeded from examples)
+- Generate **80-100 keywords minimum** (product names, not generic terms, seeded from examples)
 - Map locations and employee sizes
+
+**CRITICAL: Generate 80-100+ keywords, not 20-30.** Keywords are FREE (LLM generation). Each keyword fires a separate Apollo request discovering different companies. More keywords = more unique companies. The cost is per-page (1 credit each), but most keywords exhaust in 1 page. 100 keywords at 1 page each = 100 credits max, but the 400-company cap stops gathering long before all keywords are used.
 
 **Probe (6 credits max):**
 ```
@@ -323,9 +333,9 @@ Show: "Found {N} accounts matching '{hint}': {top emails}. Using these."
 If user provides campaign names/IDs/URLs:
   → Extract campaign_id from SmartLead URL if provided:
     "https://app.smartlead.ai/app/email-campaign/3137079/analytics" → campaign_id = 3137079
-  → smartlead_export_leads(campaign_id) → extract domains
-  → Save as PROJECT-LEVEL blacklist (not global — different project = different offer = OK to contact):
-    save_data(project, "blacklist.json", {domain: {source: "smartlead_campaign", campaign_name: ...} for domain in domains})
+  → ONE deterministic tool call — exports + saves project blacklist:
+    pipeline_import_blacklist(project=project_slug, campaign_id=3137079)
+    → Exports leads, saves to projects/{project}/blacklist.json automatically
   → Show: "Blacklisted {N} domains from campaign {name} (project-level)."
 
 If user provides Google Sheet URL:
@@ -986,32 +996,12 @@ For each unique keyword in run.requests[]:
 
 Sort by quality_score DESC.
 
-# 2. Save leaderboard to run file
-save_data(project, "runs/{run_id}.json", {
-  keyword_leaderboard: keyword_leaderboard,
-  industry_leaderboard: [...same computation for industries...]
-}, mode="merge")
-
-# 3. Update global filter intelligence
-existing_intel = load_data("_global", "filter_intelligence.json")
-
-For each keyword in leaderboard:
-  If keyword exists in intel.keyword_knowledge:
-    Update: avg_target_rate, increment times_used, update best_target_rate
-  Else:
-    Create new entry with this run's stats
-
-# Update segment playbook for this segment
-segment_name = run's primary segment
-intel.segment_playbooks[segment_name] = {
-  best_keywords: top 5 by quality_score,
-  avg_target_rate: from this + previous runs,
-  avg_cost_per_contact: total_credits / contacts_extracted
-}
-
-save_data("_global", "filter_intelligence.json", intel)
+# 2. TWO deterministic tool calls — compute leaderboard + save intelligence
+pipeline_compute_leaderboard(project=project_slug, run_id=run_id)
+pipeline_save_intelligence(project=project_slug, run_id=run_id)
 ```
 
+Both are deterministic tools. Zero LLM. Guaranteed to run and persist.
 This ensures Mode 3 future runs and new projects in similar segments start with proven keywords.
 
 ---
