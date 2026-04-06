@@ -753,11 +753,16 @@ user_email = config.values.user_email    # from GTM_MCP_USER_EMAIL in .env
 smartlead_send_test_email(campaign_id, user_email)
 ```
 
-### Google Sheet (if configured)
+### Google Sheet — ALWAYS attempt
 
 ```
-sheets_export_contacts(project, campaign_slug)
-→ Creates sheet with target_confidence + target_reasoning columns
+# Always try to create Google Sheet. If credentials not configured, it will return an error — that's OK, skip gracefully.
+sheet_result = sheets_export_contacts(project, campaign_slug)
+if sheet_result.success:
+  sheet_url = sheet_result.data.sheet_url
+  # Sheet has contact headers + target_confidence + target_reasoning columns
+else:
+  sheet_url = null  # Google not configured — show "not configured" in output
 ```
 
 ### Present for activation
