@@ -102,10 +102,33 @@ For keyword in keywords[:3]:
 ```
 
 Collect probe_breakdown: companies per filter, total available.
+Dedup probe results by domain → `probe_companies` list.
 
-**Estimate cost:**
+**Probe classification (0 credits — scrape + LLM only):**
+
+Pick ~15-20 companies from probe results (mix of keyword and industry streams, skip obvious giants):
 ```
-apollo_estimate_cost(target_count=kpi, contacts_per_company=3)
+For company in probe_companies[:20]:
+  scraped = scrape_website(company.domain)
+  → Classify using company-qualification skill (via negativa)
+  → Record: is_target, confidence, segment, reasoning
+```
+
+Calculate `probe_target_rate` = targets / scraped_successfully.
+This is the REAL target rate from actual data — not a guess. Show examples in strategy doc:
+```
+  PROBE CLASSIFICATION (20 sampled, 0 credits):
+    Targets: 7/18 scraped (39%)
+    ✓ Stax Payments — payment infrastructure (PAYMENTS, 92%)
+    ✓ Synctera — BaaS platform (BAAS, 88%)
+    ✗ Chase Bank — traditional bank, too large
+    ✗ Robinhood — B2C consumer fintech
+    ...
+```
+
+**Estimate cost** using real probe target rate:
+```
+apollo_estimate_cost(target_count=kpi, contacts_per_company=3, target_rate=probe_target_rate)
 ```
 
 **Resolve email accounts (user MUST specify):**
@@ -164,7 +187,15 @@ Strategy Document:
     {industry_2}: {total} companies
     → {unique} unique from probe
 
-  COST: ~{total} credits (${usd}), max cap: {max_cost}
+  PROBE CLASSIFICATION ({N} sampled, 0 credits):
+    Target rate: {targets}/{scraped} ({probe_target_rate}%)
+    ✓ {company_1} — {reasoning} ({segment}, {confidence}%)
+    ✓ {company_2} — {reasoning} ({segment}, {confidence}%)
+    ✗ {company_3} — {exclusion_reason}
+    ✗ {company_4} — {exclusion_reason}
+
+  COST (based on {probe_target_rate}% real target rate):
+    ~{total} credits (${usd}), max cap: {max_cost}
   KPI: {target} contacts, 3/company
   Accounts: {N} selected
   Sequence: GOD_SEQUENCE (4-5 steps)
@@ -258,9 +289,25 @@ run.rounds[]: {
 
 **Stop adding new keyword batches when 400 unique companies reached in this round.**
 
-### Scrape + Classify (spawn worker agent for batch processing)
+### Scrape (deterministic — use MCP tool directly, NOT agents)
 
-For each batch of gathered companies (~50-100 at a time), **spawn a background agent** for parallel scrape+classify:
+**Scraping is deterministic. Call `scrape_website` MCP tool directly in parallel batches.**
+Do NOT spawn agents for scraping — agents use Fetch/WebFetch which bypasses the Apify proxy.
+
+```
+# Scrape in batches of 15-20 parallel tool calls
+For each batch of domains:
+  scrape_website("https://" + domain_1)   # all in parallel
+  scrape_website("https://" + domain_2)
+  ...
+  scrape_website("https://" + domain_20)
+```
+
+Store each result: `company.scrape = {status: "success"|"failed", text_length: N, text: "..."}`
+
+### Classify (AI reasoning — spawn agents for parallel batch analysis)
+
+After scraping, spawn agents to classify the **already-scraped** text. Agents do the AI reasoning part only — they read scraped text from the run file, they don't scrape.
 
 ```
 Use the Agent tool:
@@ -270,25 +317,25 @@ Use the Agent tool:
     Segments: {segments with keywords}
     Exclusions: {exclusion_list}
     
-    For each domain in this batch, do:
-    1. scrape_website('https://' + domain)
-    2. Classify from SCRAPED TEXT ONLY (never Apollo industry label)
-    3. Via negativa: focus on EXCLUDING non-matches
-    4. Output per company: is_target, confidence (0-100), segment (CAPS_SNAKE_CASE), reasoning
-    5. Normalize company name: strip ', Inc.', ', LLC', ', Ltd.', ', Corp.', ', GmbH'
+    For each company below, classify from the SCRAPED TEXT (already provided).
+    NEVER re-scrape — the text is already here. NEVER use Apollo industry label.
+    Via negativa: focus on EXCLUDING non-matches.
+    Output per company: is_target, confidence (0-100), segment (CAPS_SNAKE_CASE), reasoning
+    Normalize company name: strip ', Inc.', ', LLC', ', Ltd.', ', Corp.', ', GmbH'
     
-    Domains to process: {batch_of_domains}
+    Companies to classify:
+    {domain_1}: {scraped_text_1[:2000]}
+    {domain_2}: {scraped_text_2[:2000]}
+    ...
     
     Save results: save_data('{project}', 'runs/{run_id}.json', 
-      {companies: {domain: {classification: {...}, scrape: {...}, name_normalized: ...}}}, 
+      {companies: {domain: {classification: {...}, name_normalized: ...}}}, 
       mode='merge')"
   subagent_type: general-purpose
   run_in_background: true
 ```
 
-You can spawn **multiple agents in parallel** — e.g. 3-4 agents each processing 50 companies simultaneously. This is MUCH faster than doing it inline.
-
-While agents process, continue gathering the next keyword batch if needed.
+Spawn 2-3 classification agents in parallel, each processing ~50 companies' scraped text.
 
 **When agents complete**, read the updated run file to check results:
 ```
