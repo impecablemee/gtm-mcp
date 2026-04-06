@@ -7,6 +7,26 @@ argument-hint: "[website/file/text] — e.g. 'https://acme.com payments in US' o
 
 Full pipeline: input → gather → qualify → SmartLead campaign. **Two human checkpoints, everything else autonomous.**
 
+## Speed Optimization: LLM vs Deterministic
+
+| Task | Type | Method | Speed |
+|------|------|--------|-------|
+| **Offer extraction** | LLM | You analyze text, produce JSON | ~30s |
+| **Filter generation** | LLM | You pick industries/keywords from taxonomy | ~20s |
+| **Apollo search** | DETERMINISTIC | `apollo_search_companies` — batch parallel tool calls | ~5s |
+| **Website scraping** | DETERMINISTIC | `scrape_batch(domains, 100)` — ONE tool call, 100 concurrent | ~30-60s |
+| **Classification** | LLM | You read scraped text, apply via negativa rules inline | ~2s/company |
+| **People search** | DETERMINISTIC | `apollo_search_people_batch(domains)` — ONE tool call, 20 concurrent | ~10s |
+| **People enrichment** | DETERMINISTIC | `apollo_enrich_people(ids)` — auto-chunks to 10 | ~5s/batch |
+| **Sequence generation** | LLM | You generate emails following 12-rule checklist | ~30s |
+| **Campaign creation** | DETERMINISTIC | `smartlead_create_campaign` + `set_sequence` + `add_leads` | ~10s |
+| **Sheet export** | DETERMINISTIC | `sheets_export_contacts` | ~5s |
+
+**Rule: ALWAYS use batch tools for deterministic I/O. Never call per-item when batch exists.**
+- `scrape_batch` NOT individual `scrape_website`
+- `apollo_search_people_batch` NOT individual `apollo_search_people`
+- `apollo_enrich_people` already batches (auto-chunks to 10)
+
 **Read before starting:**
 - **pipeline-state** skill — run file entity format (FilterSnapshot, Company, Contact)
 - **io-state-safe** skill — state.yaml schema and validation rules
@@ -35,6 +55,36 @@ Free text:
 - `project=` → MODE 2. Call `load_data(project, "project.yaml")` → verify `offer_approved == true`. Check segment not already used in `project.campaigns[]`.
 - Neither → MODE 1. Fresh project.
 
+## Initialize State
+
+**Before ANY work**, create state.yaml with ALL required fields:
+```
+save_data(project, "state.yaml", {
+  session_id: "launch-{project_slug}-{YYYYMMDD}-{HHMMSS}",
+  project: project_slug,
+  pipeline: "launch",
+  mode: "fresh",                          # or "new_campaign" or "append"
+  status: "running",
+  current_phase: "offer_extraction",
+  active_campaign_slug: null,             # set in Step 7
+  active_campaign_id: null,               # set in Step 7
+  active_run_id: "run-001",
+  phase_states: {
+    offer_extraction: "pending",          # Mode 2/3: "skipped"
+    filter_generation: "pending",
+    cost_gate: "pending",
+    round_loop: "pending",
+    people_extraction: "pending",
+    sequence_generation: "pending",       # Mode 3: "skipped"
+    campaign_push: "pending"
+  },
+  started_at: "{ISO timestamp}",
+  last_updated: "{ISO timestamp}",
+  error: null,
+  completed_at: null
+})
+```
+
 ## Resume Check
 
 ```
@@ -43,13 +93,9 @@ If exists and status != "completed":
   → Show progress, ask "Resume from {current_phase}?"
   → If yes: skip completed/skipped steps
     → For "in_progress" phases: load run file, check what's already done:
-      - round_loop in_progress: read run.companies{} → already gathered/scraped/classified
-        companies are KEPT. Resume from next keyword batch, don't re-gather.
-      - people_extraction in_progress: read run.contacts[] → already extracted contacts
-        are KEPT. Resume from next target company, don't re-enrich.
-      - campaign_push in_progress: check if campaign already created in SmartLead
-        → if yes, skip creation, just push remaining leads.
-    → This prevents wasting Apollo credits on re-doing completed work within a phase.
+      - round_loop in_progress: read run.companies{} — KEEP existing, resume from next batch
+      - people_extraction in_progress: read run.contacts[] — KEEP existing, resume from next company
+      - campaign_push in_progress: check if campaign created → if yes, just push remaining leads
   → If no: archive old state, start fresh
 ```
 
@@ -77,7 +123,15 @@ Use the **offer-extraction** skill rules to produce structured JSON:
 save_data(project, "project.yaml", {name, slug, offer: extracted, offer_approved: false, campaigns: []}, mode="merge")
 ```
 
-Update state: `save_data(project, "state.yaml", {..., phase_states: {offer_extraction: "completed"}})`
+**Update state** (do this at EVERY phase boundary — load current state, update, save):
+```
+save_data(project, "state.yaml", {
+  ...current_state,
+  current_phase: "filter_generation",
+  phase_states: {...current_state.phase_states, offer_extraction: "completed"},
+  last_updated: "{ISO timestamp}"
+}, mode="write")
+```
 
 ---
 
@@ -150,17 +204,45 @@ smartlead_search_accounts("sally")  # or whatever the user specified
 → Returns matching account IDs ready for campaign creation
 ```
 
-**Create run file:**
+**Create run file with ALL required fields:**
 ```
 save_data(project, "runs/run-001.json", {
-  run_id: "run-001", project, campaign_id, campaign_slug, mode,
-  status: "running", kpi: {target_people: kpi, max_people_per_company: 3, max_credits: max_cost},
-  probe: {breakdown, credits_used}, filter_snapshots: [fs_001],
-  rounds: [], requests: [], companies: {}, contacts: [], totals: {...}
+  run_id: "run-001",
+  project: project_slug,
+  campaign_id: null,                    # set in Step 7
+  campaign_slug: null,                  # set in Step 7
+  mode: "fresh",                        # or "append"
+  status: "running",
+  created_at: "{ISO timestamp}",
+  kpi: {target_people: kpi, max_people_per_company: 3, max_credits: max_cost},
+  dedup_baseline: {previous_run_companies: 0, previous_run_contacts: 0, seen_domains_count: 0, seen_emails_count: 0},
+  probe: {breakdown: [...], credits_used: N, companies_from_probe: N},
+  filter_snapshots: [{id: "fs-001", trigger: "initial_generation", filters: {...}}],
+  rounds: [],
+  requests: [],                         # MUST be populated — see Step 4
+  companies: {},
+  contacts: [],
+  totals: {
+    rounds_completed: 0, total_api_requests: 0,
+    total_credits_search: 0, total_credits_people: 0, total_credits: N,
+    unique_companies: 0, targets: 0, contacts_extracted: 0,
+    contacts_deduped_skipped: 0, kpi_met: false
+  },
+  keyword_leaderboard: [],
+  campaign: null                        # populated in Step 7
 })
 ```
 
-Update state: `save_data(project, "state.yaml", {..., phase_states: {filter_generation: "completed"}})`
+**Update state:**
+```
+save_data(project, "state.yaml", {
+  ...current_state,
+  current_phase: "cost_gate",
+  active_run_id: "run-001",
+  phase_states: {..., filter_generation: "completed"},
+  last_updated: "{ISO timestamp}"
+}, mode="write")
+```
 
 ---
 
@@ -262,34 +344,39 @@ apollo_search_companies({organization_industry_tag_ids: ["tag_id_1"], ...})
 
 Dedup by domain across ALL results. Skip `seen_domains` (Mode 3). Probe companies from Step 2 are already gathered — skip page 1 for probed filters.
 
-**Track EVERY Apollo request** in the run file as an APIRequest entity:
+**IMPORTANT: Track EVERY Apollo request.** After each `apollo_search_companies` call returns, IMMEDIATELY append to `run.requests[]`:
 ```
-For each apollo_search_companies call, record in run.requests[]:
-{
-  id: "req-{NNN}",              # sequential within run
-  round_id: "round-001",
-  filter_snapshot_id: "fs-001",
-  type: "keyword" | "industry",
-  filter_value: "payment gateway" | "5567cd82...",
-  funded: true | false,
-  page: 1,
-  result: {raw_returned: 100, new_unique: 72, duplicates: 28, credits_used: 1}
-}
+save_data(project, "runs/run-001.json", {
+  requests: [{
+    id: "req-001",
+    round_id: "round-001",
+    filter_snapshot_id: "fs-001",
+    type: "keyword",                    # or "industry"
+    filter_value: "payment gateway",    # or tag_id
+    funded: false,
+    page: 1,
+    result: {raw_returned: 100, new_unique: 72, duplicates: 28, credits_used: 1}
+  }]
+}, mode="merge")
 ```
+This is CRITICAL for per-keyword tracking and Mode 3 seeding. Do NOT skip this.
 
-**Track each company's provenance**: `company.discovery.found_by_requests = ["req-003", "req-017"]` — which keyword/industry requests found it.
+**Track company provenance**: each company gets `discovery: {found_by_requests: ["req-001", "req-005"]}`.
 
-**Wrap each gather→scrape→classify cycle in a Round**:
+**After all gathering + scraping + classification in a round, save the Round entity:**
 ```
-run.rounds[]: {
-  id: "round-001",
-  filter_snapshot_id: "fs-001",
-  status: "completed",
-  gather_phase: {keywords_used: [...], request_ids: [...], unique_companies: N, credits_used: N},
-  scrape_phase: {total: N, success: N, failed: N},
-  classify_phase: {targets: N, rejected: N, target_rate: 0.27},
-  people_phase: {contacts_extracted: N, credits_used: N}   # filled in Step 5
-}
+save_data(project, "runs/run-001.json", {
+  rounds: [{
+    id: "round-001",
+    filter_snapshot_id: "fs-001",
+    status: "completed",
+    gather_phase: {keywords_used: [...], request_ids: [...], unique_companies: N, credits_used: N},
+    scrape_phase: {total: N, success: N, failed: N},
+    classify_phase: {targets: N, rejected: N, target_rate: 0.27},
+    people_phase: {contacts_extracted: 0, credits_used: 0}  # updated in people extraction
+  }],
+  totals: {rounds_completed: 1, total_api_requests: N, total_credits_search: N, unique_companies: N, targets: N}
+}, mode="merge")
 ```
 
 **Stop adding new keyword batches when 400 unique companies reached in this round.**
@@ -436,11 +523,24 @@ enriched = apollo_enrich_people(person_ids=[top_3_ids])
 
 **Side effect**: `apollo_enrich_people` may return `industry_tag_id` → auto-extends taxonomy.
 
+**Save contacts incrementally** — after each batch of enrichments:
+```
+save_data(project, "runs/{run_id}.json", {
+  contacts: [...new_contacts_from_this_batch],
+  totals: {contacts_extracted: N, total_credits_people: N, total_credits: N}
+}, mode="merge")
+```
+
 **When KPI met**, save everything:
 ```
 save_data(project, "contacts.json", all_contacts, mode="write")
-save_data(project, "runs/{run_id}.json", {..., contacts: all_contacts, totals: {kpi_met: true}}, mode="merge")
-save_data(project, "state.yaml", {..., phase_states: {round_loop: "completed", people_extraction: "completed"}})
+save_data(project, "runs/{run_id}.json", {totals: {kpi_met: true}}, mode="merge")
+save_data(project, "state.yaml", {
+  ...current_state,
+  current_phase: "sequence_generation",
+  phase_states: {..., round_loop: "completed", people_extraction: "completed"},
+  last_updated: "{ISO timestamp}"
+}, mode="write")
 ```
 
 ---
