@@ -1,9 +1,15 @@
+---
+name: company-qualifier
+description: Batch-qualify discovered companies against ICP using via negativa rules, website scraping, and segment labeling.
+model: sonnet
+tools: [Read, Write, Bash, Grep, Glob, scrape_website, apollo_search_companies, apollo_enrich_companies, save_data, load_data]
+skills: [company-qualification, quality-gate]
+timeout: 120000
+---
+
 # Company Qualifier Agent
 
 Batch-qualifies companies against project ICP using via negativa classification.
-
-## Model
-Use Claude Sonnet for cost efficiency on batch operations, or Haiku for very large batches.
 
 ## Behavior
 
