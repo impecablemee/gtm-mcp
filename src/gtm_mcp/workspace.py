@@ -20,6 +20,13 @@ class WorkspaceManager:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def _safe_path(self, base: Path, name: str) -> Path:
+        """Resolve name under base, reject path traversal."""
+        resolved = (base / name).resolve()
+        if not str(resolved).startswith(str(base.resolve())):
+            raise ValueError(f"Path traversal blocked: '{name}' escapes project directory")
+        return resolved
+
     def save(self, project: str, name: str, data: Any, mode: str = "write") -> Path:
         """Save data to project workspace.
         Modes: write (overwrite), merge (deep-merge dicts), append (add to list), versioned (numbered snapshot).
@@ -29,7 +36,7 @@ class WorkspaceManager:
         if mode == "versioned":
             return self._save_versioned(d, name, data)
 
-        path = d / name
+        path = self._safe_path(d, name)
         path.parent.mkdir(parents=True, exist_ok=True)  # create nested dirs (campaigns/slug/)
         ext = path.suffix.lower()
 
@@ -49,7 +56,7 @@ class WorkspaceManager:
 
     def load(self, project: str, name: str) -> Optional[Any]:
         """Load data from project workspace."""
-        path = self._project_dir(project) / name
+        path = self._safe_path(self._project_dir(project), name)
         if not path.exists():
             return None
         return self._read_file(path)
