@@ -7,25 +7,46 @@ argument-hint: "[website/file/text] — e.g. 'https://acme.com payments in US' o
 
 Full pipeline: input → gather → qualify → SmartLead campaign. **Two human checkpoints, everything else autonomous.**
 
-## Speed Optimization: LLM vs Deterministic
+## Speed: Deterministic Tools First, LLM Only Where Essential
 
-| Task | Type | Method | Speed |
-|------|------|--------|-------|
-| **Offer extraction** | LLM | You analyze text, produce JSON | ~30s |
-| **Filter generation** | LLM | You pick industries/keywords from taxonomy | ~20s |
-| **Apollo search** | DETERMINISTIC | `apollo_search_companies` — batch parallel tool calls | ~5s |
-| **Website scraping** | DETERMINISTIC | `scrape_batch(domains, 100)` — ONE tool call, 100 concurrent | ~30-60s |
-| **Classification** | LLM | You read scraped text, apply via negativa rules inline | ~2s/company |
-| **People search** | DETERMINISTIC | `apollo_search_people_batch(domains)` — ONE tool call, 20 concurrent | ~10s |
-| **People enrichment** | DETERMINISTIC | `apollo_enrich_people(ids)` — auto-chunks to 10 | ~5s/batch |
-| **Sequence generation** | LLM | You generate emails following 12-rule checklist | ~30s |
-| **Campaign creation** | DETERMINISTIC | `smartlead_create_campaign` + `set_sequence` + `add_leads` | ~10s |
-| **Sheet export** | DETERMINISTIC | `sheets_export_contacts` | ~5s |
+**The pipeline has 3 atomic deterministic tools that do 90% of the work. LLM is only for offer extraction, keyword generation, and classification.**
 
-**Rule: ALWAYS use batch tools for deterministic I/O. Never call per-item when batch exists.**
-- `scrape_batch` NOT individual `scrape_website`
-- `apollo_search_people_batch` NOT individual `apollo_search_people`
-- `apollo_enrich_people` already batches (auto-chunks to 10)
+### Deterministic tools (Python, asyncio, zero LLM):
+
+| Tool | What it does | Speed |
+|------|-------------|-------|
+| `pipeline_gather_and_scrape` | All Apollo searches + all scraping in one call, streaming | ~60-90s |
+| `campaign_push` | Create campaign + sequence + upload ALL leads + test email | ~10s |
+| `pipeline_save_contacts` | Save contacts to both contacts.json AND run file + totals | ~1s |
+| `pipeline_compute_leaderboard` | Compute keyword quality scores from run data | ~1s |
+| `sheets_export_contacts` | Create Google Sheet with contacts + reasoning | ~5s |
+| `smartlead_export_leads` | Export campaign leads for blacklist | ~3s |
+| `smartlead_get_campaign` | Load reference sequence from existing campaign | ~3s |
+| `smartlead_list_accounts` | Cache 2000+ accounts, return summary | ~5s |
+| `smartlead_search_accounts` | Filter cached accounts by name/domain | ~instant |
+| `apollo_enrich_companies` | Enrich example companies for keyword seeds | ~5s |
+
+### LLM needed (cannot be deterministic):
+
+| Task | Why LLM | Speed | Can optimize? |
+|------|---------|-------|---------------|
+| **Offer extraction** | Analyze text → structured JSON | ~30s | No — requires understanding |
+| **Keyword generation** | Pick industry-specific terms from taxonomy | ~20s | Partially — example enrichment reduces LLM work |
+| **Classification** | Via negativa judgment on scraped text | ~3-5min (Haiku agents) | No — requires reasoning per company |
+
+### NOT LLM (common mistakes to avoid):
+
+| Task | WRONG (LLM) | RIGHT (deterministic tool) |
+|------|-------------|---------------------------|
+| Upload leads to SmartLead | Agent batching via LLM agent (4m 46s!) | `campaign_push` reads file, chunks 100 (~10s) |
+| Save contacts to run file | Agent load→update→write (fails) | `pipeline_save_contacts` (~1s) |
+| Compute keyword leaderboard | Agent computes inline (skips it) | `pipeline_compute_leaderboard` (~1s) |
+| Export to Google Sheet | Could use agent | `sheets_export_contacts` (~5s) |
+| Blacklist from campaign | Could use agent | `smartlead_export_leads` + `save_data` (~5s) |
+| Sequence from reference campaign | Could use agent to copy | `smartlead_get_campaign` → extract steps (~3s) |
+| Save run file after gather | Agent save_data (forgets fields) | `pipeline_gather_and_scrape` auto-saves internally |
+
+**Rule: If a task has NO judgment/creativity, it MUST be a deterministic tool call. Never use LLM for I/O orchestration.**
 
 **Timestamp EVERY phase** in run file for post-run speed analysis:
 Record `{phase}_started` and `{phase}_completed` ISO timestamps in `round.timestamps`.
@@ -673,26 +694,35 @@ Update state: `save_data(project, "state.yaml", {..., phase_states: {round_loop:
 
 People extraction runs INSIDE Step 4's streaming loop (sub-step 3). These are the detailed rules:
 
-**FREE search → PAID enrichment per target:**
+**Use BATCH tools — not per-company calls:**
+
 ```
-# FREE — no credits
-people = apollo_search_people(domain=target.domain, person_seniorities=["owner","founder","c_suite","vp","head","director"])
+# Collect all target domains
+target_domains = [d for d, c in run.companies.items() if c.classification.is_target]
 
-# Pick top 3 matching target_roles. Priority: owner > founder > c_suite > vp > head > director
+# ONE batch call: search people for ALL targets (FREE, 20 concurrent)
+search_results = apollo_search_people_batch(
+  target_domains, 
+  person_seniorities=["owner","founder","c_suite","vp","head","director"],
+  per_page=10
+)
 
-# 1 credit per person
-enriched = apollo_enrich_people(person_ids=[top_3_ids])
+# Collect top 3 person IDs per company, flatten into one list
+all_person_ids = []
+for result in search_results.data.results:
+  # Pick top 3 matching target_roles. Priority: owner > founder > c_suite > vp > head > director
+  top_3 = [p.id for p in result.people[:3]]
+  all_person_ids.extend(top_3)
+
+# ONE batch call: enrich ALL people (1 credit per verified email, auto-chunks to 10)
+enriched = apollo_enrich_people(person_ids=all_person_ids)
 ```
 
-**Retry logic** (if <3 verified emails):
-- Round 2: next 3 candidates (different people, same company)
-- Round 3: remaining candidates
-- Max 3 enrichment rounds, 12 credits per company
-- If still <3 → accept what you have, move on
+**TWO tool calls for ALL people extraction.** Not per-company. Not per-person.
+
+**Retry**: if total contacts < KPI after first pass, do a second pass with next-3 candidates per under-served company. Still batch calls.
 
 **Contact dedup**: skip duplicate emails within run. Mode 3: also skip `seen_emails`.
-
-**Side effect**: `apollo_enrich_people` may return `industry_tag_id` → auto-extends taxonomy.
 
 **Save contacts — use deterministic tool (not manual load→update→write).**
 
