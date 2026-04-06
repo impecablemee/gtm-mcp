@@ -53,7 +53,12 @@ If file: read file from disk → analyze text.
 If text: analyze directly.
 
 Use the **offer-extraction** skill rules to produce structured JSON:
-- `primary_offer`, `segments[]` (name + 8-10 keywords each), `target_roles`, `apollo_filters`, `exclusion_list`
+- `primary_offer`, `segments[]` (name + 8-10 SPECIFIC keywords each — product names, not generic terms)
+- `target_roles` (primary/secondary/tertiary with seniorities)
+- `apollo_filters` (locations, employee_range, industries, funding_stages)
+- `exclusion_list` (competitors, wrong_industry, too_large)
+- `sequences` (if document contains email sequences — preserve exact text)
+- `seed_data` (all segment keywords merged, deduped)
 
 ```
 save_data(project, "project.yaml", {name, slug, offer: extracted, offer_approved: false, campaigns: []}, mode="merge")
@@ -178,32 +183,76 @@ seen_emails = {lead.email for lead in existing.leads}
 
 ### Round loop
 
-**CRITICAL: 1 keyword per request, 1 tag_id per request. NEVER combine.**
+**CRITICAL: 1 keyword per request, 1 tag_id per request. NEVER combine.** Combining changes Apollo's ranking and yields fewer unique companies.
 
-For each keyword (parallel):
+**Pagination rules per keyword/industry stream:**
+- Max 5 pages per stream (diminishing returns beyond that)
+- If page 1 returns <10 companies → stop that stream immediately (low yield)
+- If 3 consecutive pages return 0 new unique companies → stream exhausted, stop
+- Each page = 1 Apollo credit
+
+**Funding cascade:** If funding filter specified in offer:
+- Run BOTH funded AND unfunded variants of each keyword/industry simultaneously
+- If funded stream exhausted → continue unfunded only
+- Unfunded often has sparse pagination — that's expected, not an error
+
+**Execute in keyword batches** (10 keywords per batch to avoid overwhelming):
+
+BATCH 1 — first 10 keywords + all tag_ids (parallel):
 ```
-apollo_search_companies({q_organization_keyword_tags: [keyword], organization_locations: [...], organization_num_employees_ranges: [...]})
+# Each as a SEPARATE tool call, all in parallel:
+apollo_search_companies({q_organization_keyword_tags: ["keyword1"], organization_locations: [...], organization_num_employees_ranges: [...]})
+apollo_search_companies({q_organization_keyword_tags: ["keyword2"], ...})
+...
+apollo_search_companies({organization_industry_tag_ids: ["tag_id_1"], ...})
+...
 ```
 
-For each tag_id (parallel):
-```
-apollo_search_companies({organization_industry_tag_ids: [tag_id], ...})
-```
+Dedup by domain across ALL results. Skip `seen_domains` (Mode 3). Track which keyword/industry found each company. Probe companies from Step 2 are already gathered — skip page 1 for probed filters.
 
-Dedup by domain. Skip `seen_domains`. Stop at 400 unique companies per round.
+**Stop adding new keyword batches when 400 unique companies reached in this round.**
 
 **Scrape** each company (parallel, batches of 10-20):
 ```
-scrape_website(company.primary_domain)
+scrape_website("https://" + company.primary_domain)
+```
+Start scraping as soon as first batch of companies arrives — don't wait for all 400.
+
+**Classify** each scraped company using **company-qualification** skill rules:
+- Read company-qualification skill for via negativa rules
+- Classify from SCRAPED WEBSITE TEXT only — never use Apollo's industry label
+- Output: `is_target` (bool), `confidence` (0-100), `segment` (CAPS_SNAKE_CASE), `reasoning` (1-2 sentences)
+- High confidence = 80-100 (clear match/reject), Medium = 40-79 (needs context), Low = 0-39 (uncertain)
+- For medium confidence (40-70): do a 2-pass re-evaluation — re-read the text with tighter criteria
+
+**After each batch of scrape+classify**, update run file:
+```
+save_data(project, "runs/run-001.json", {
+  ...run,
+  companies: {...existing, ...new_companies_keyed_by_domain},
+  totals: {unique_companies: N, targets: M, target_rate: M/N}
+}, mode="merge")
 ```
 
-**Classify** each scraped company using **company-qualification** skill rules (via negativa — you do this inline, no tool call):
-- Is this a target? → `is_target`, `confidence`, `segment`, `reasoning`
-- Focus on EXCLUDING non-matches, not defining matches
+**KPI check after classification**: Do we have enough targets to extract 100 contacts (at 3/company, need ~34 targets)?
+- YES → proceed to Step 5 (people extraction)
+- NO, keywords remaining → load next batch of 10 keywords → continue round
+- NO, all keywords exhausted → **regenerate keywords** using quality-gate skill's 10 angles:
+  1. Product names from found targets
+  2. Technology stacks
+  3. Use cases and workflows
+  4. Buyer language
+  5. Adjacent niches
+  6. Competitor names
+  7. Industry jargon
+  8. Problem descriptions
+  9. Solution categories
+  10. Market segments
+  Max 5 regeneration cycles. Each creates a new FilterSnapshot with parent_id linking to previous.
 
-**If target_rate < 15% after round**: autonomously regenerate keywords using **quality-gate** skill's 10 angles. Create new round. Max 5 regeneration cycles.
+**Track per-keyword performance** in run file: each keyword gets `unique_companies`, `targets`, `target_rate`, `credits_used`. This becomes the `keyword_leaderboard` for Mode 3 seeding.
 
-Update run file after each batch: `save_data(project, "runs/run-001.json", updated_run, mode="merge")`
+**Normalize company names** before storing: strip legal suffixes (", Inc.", ", LLC", ", Ltd.", ", Corp.", ", GmbH", etc.), trim whitespace, keep original casing. Store both `name` (raw) and `name_normalized` (cleaned).
 
 Update state: `save_data(project, "state.yaml", {..., phase_states: {round_loop: "completed"}})`
 
@@ -215,18 +264,35 @@ Update state: `save_data(project, "state.yaml", {..., current_phase: "people_ext
 
 For each target company (parallel, batches of 5-10):
 
+**Round 1 (FREE search → PAID enrichment):**
 ```
-# FREE — no credits
-people = apollo_search_people(domain=company.domain, person_seniorities=["c_suite","vp","head","director"])
+# FREE — no credits. Returns name, title, linkedin, but NOT email.
+people = apollo_search_people(
+  domain=company.domain,
+  person_seniorities=["owner","founder","c_suite","vp","head","director"]
+)
+```
+Pick top 3 candidates matching target_roles from offer. Priority: owner > founder > c_suite > vp > head > director.
 
-# 1 credit per person
-enriched = apollo_enrich_people(person_ids=[top_matches])
+```
+# 1 credit per person. Returns verified email.
+enriched = apollo_enrich_people(person_ids=[top_3_ids])
 ```
 
-Priority: owner > founder > c_suite > vp > head > director.
-Retry: if <3 verified, try next candidates (max 3 rounds, 12 credits/company).
-Mode 3: skip contacts where email in `seen_emails`.
-**Stop immediately when total_verified >= kpi target.**
+**Retry logic** (if <3 verified emails after Round 1):
+- Round 2: try next 3 candidates from search results (different people, same company)
+- Round 3: try remaining candidates
+- Max 3 enrichment rounds per company, max 12 credits per company total
+- If still <3 after 3 rounds → accept what you have, move on
+
+**Side effect**: `apollo_enrich_people` (bulk_match) may return company's `industry_tag_id` — this auto-extends taxonomy knowledge for future runs.
+
+**Contact dedup:**
+- Within this run: skip duplicate emails
+- Mode 3: also skip emails in `seen_emails` (from campaign export)
+
+**KPI stop condition**: After EACH enrichment batch, count total verified contacts.
+**Stop immediately when total_verified >= kpi target.** Don't finish the current batch unnecessarily.
 
 ```
 save_data(project, "contacts.json", all_contacts, mode="write")
@@ -317,6 +383,19 @@ Campaign Ready (DRAFT):
 ```
 smartlead_activate_campaign(campaign_id, "I confirm")
 save_data(project, "state.yaml", {..., phase_states: {campaign_push: "completed"}, status: "completed"})
+```
+
+### Post-run: update cross-run intelligence
+
+After pipeline completes (before or after activation):
+```
+# Load run file keyword/industry leaderboards
+# Update ~/.gtm-mcp/filter_intelligence.json with quality scores
+# This helps future runs start with proven keywords
+save_data("_global", "filter_intelligence.json", {
+  keyword_knowledge: {..., new entries from this run},
+  segment_playbooks: {..., best keywords for this segment}
+}, mode="merge")
 ```
 
 ---
