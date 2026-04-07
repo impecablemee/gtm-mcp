@@ -255,7 +255,25 @@ Use the **offer-extraction** skill rules to produce structured JSON:
 - `seed_data` (all segment keywords merged, deduped)
 
 ```
-save_data(project, "project.yaml", {name, slug, offer: extracted, offer_approved: false, campaigns: []}, mode="merge")
+save_data(project, "project.yaml", {
+  name: project_name,
+  slug: project_slug,
+  _source: "document" | "website" | "chat",
+  primary_offer: extracted.primary_offer,
+  value_proposition: extracted.value_proposition,
+  target_audience: extracted.target_audience,
+  target_roles: extracted.target_roles,
+  segments: extracted.segments,                    # ALL segments with keywords
+  sequences: extracted.sequences,                  # ALL sequences (not just first!)
+  apollo_filters: extracted.apollo_filters,        # locations, excluded_locations, employee_range, etc.
+  exclusion_list: extracted.exclusion_list,
+  email_accounts: {filter_used, count},
+  campaign_settings: extracted.campaign_settings,
+  offer_approved: false,
+  campaigns: [],
+}, mode="write")
+# CRITICAL: project.yaml MUST have segments, sequences, apollo_filters, exclusion_list.
+# Previous runs failed because agent saved these only to pipeline-config but not project.yaml.
 ```
 
 **Update state** (do this at EVERY phase boundary — load current state, update, save):

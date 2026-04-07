@@ -88,17 +88,25 @@ Extract ALL of the following into a structured JSON. Skip fields you can't deter
     {
       "name": "Pipeline Pain",
       "steps": [
-        {
-          "step": 1,
-          "day": 0,
-          "subject": "{{first_name}}, quick question about {{company_name}}",
-          "body": "Email body text with {{first_name}}, {{company_name}}, {{city}} variables...",
-          "subject_b": "Growth challenge at {{company_name}}"
-        }
+        {"step": 1, "day": 0, "subject": "pipeline at {{company_name}}", "body": "..."},
+        {"step": 2, "day": 3, "subject": "Re: pipeline at {{company_name}}", "body": "..."},
+        {"step": 3, "day": 7, "subject": "quick question, {{first_name}}", "body": "..."},
+        {"step": 4, "day": 14, "subject": "closing the loop", "body": "..."}
       ],
       "cadence_days": [0, 3, 7, 14]
+    },
+    {
+      "name": "Fresh Funding",
+      "steps": [
+        {"step": 1, "day": 0, "subject": "congrats on the round, {{first_name}}", "body": "..."},
+        {"step": 2, "day": 4, "subject": "Re: congrats on the round", "body": "..."},
+        {"step": 3, "day": 10, "subject": "{{company_name}} + pipeline", "body": "..."}
+      ],
+      "cadence_days": [0, 4, 10]
     }
   ],
+
+  "IMPORTANT_sequences_rule": "Extract ALL sequences from the document, not just the first one. If the document has 3 sequences (e.g., Pipeline Pain, Fresh Funding, Competitor Conquest), extract ALL 3. Each sequence has its own name, steps, and cadence. Save ALL of them.",
   
   "campaign_settings": {
     "tracking": false,
