@@ -135,6 +135,16 @@ async def pipeline_probe(
                     scraped_texts[domain] = (entry.get("text", ""))[:3000]
 
     # 3. Save to run file (so gather phase skips these domains)
+    # Save probe companies under BOTH "companies" and "probe_companies" keys.
+    # "probe_companies" survives even if agent later overwrites "companies" with mode="write".
+    # pipeline_gather_and_scrape loads from BOTH to build seen_domains.
+    probe_companies_dict = {
+        d: {**c, "scrape": {
+            "status": "success" if d in scraped_texts else "not_scraped",
+            "text_length": len(scraped_texts.get(d, "")),
+        }} for d, c in all_companies.items()
+    }
+
     if workspace and project and run_id:
         run_path = f"runs/{run_id}.json"
         run_data = workspace.load(project, run_path) or {}
@@ -143,13 +153,8 @@ async def pipeline_probe(
             "companies_from_probe": len(all_companies),
             "breakdown": breakdown,
         }
-        run_data["companies"] = {**run_data.get("companies", {}), **{
-            d: {**c, "scrape": {
-                "status": "success" if d in scraped_texts else "not_scraped",
-                "text_length": len(scraped_texts.get(d, "")),
-            }} for d, c in all_companies.items()
-        }}
-        # Set probe credits in totals
+        run_data["probe_companies"] = probe_companies_dict  # survives agent overwrite
+        run_data["companies"] = {**run_data.get("companies", {}), **probe_companies_dict}
         run_data["totals"] = {
             **run_data.get("totals", {}),
             "total_credits_probe": credits_used,
@@ -221,12 +226,18 @@ async def pipeline_gather_and_scrape(
             logger.info("Loaded %d blacklisted domains for project %s", len(bl_data), project)
     # Load existing companies from run file (probe phase saves here first)
     # This prevents re-discovering + re-scraping probe companies
+    # Check BOTH "companies" and "probe_companies" (probe_companies survives agent overwrite)
     if workspace and project and run_id:
         existing_run = workspace.load(project, f"runs/{run_id}.json")
-        if existing_run and isinstance(existing_run.get("companies"), dict):
-            existing_domains = set(existing_run["companies"].keys())
-            seen_domains.update(existing_domains)
-            logger.info("Loaded %d existing domains from run file (probe/previous)", len(existing_domains))
+        if existing_run:
+            existing_domains = set()
+            if isinstance(existing_run.get("companies"), dict):
+                existing_domains.update(existing_run["companies"].keys())
+            if isinstance(existing_run.get("probe_companies"), dict):
+                existing_domains.update(existing_run["probe_companies"].keys())
+            if existing_domains:
+                seen_domains.update(existing_domains)
+                logger.info("Loaded %d existing domains from run file (probe/previous)", len(existing_domains))
 
     companies: dict[str, dict] = {}
     requests: list[dict] = []
