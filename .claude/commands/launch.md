@@ -192,7 +192,11 @@ Free text:
 
 **Run #5 (inxy) failed catastrophically here**: website said "Excl. sanctioned countries, UK and US" but agent searched IN US and UK. 14 of 22 contacts were US/UK-based — completely unusable. This wasted 65 credits on wrong-geo contacts.
 
-**Mode 3: skip accounts/blacklist** — but STILL verify geo matches the existing campaign's target regions.
+**Mode 3 (append to existing campaign):**
+- **Accounts**: skip question IF campaign already has accounts assigned. Otherwise ask.
+- **Blacklist**: AUTO-IMPORT from the target campaign. `pipeline_import_blacklist(project, campaign_id)`.
+  Don't ask — if the user says "add more to campaign X", obviously don't re-contact X's existing leads.
+- **Geo**: STILL verify geo matches the existing campaign's target regions.
 
 **The document should provide these.** A good outreach plan includes sender info, geo restrictions, and prior campaign context. If the user's document has this info, extract it — don't re-ask. Only ask when the input is genuinely missing this information.
 
