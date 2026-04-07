@@ -842,12 +842,17 @@ async def pipeline_prepare_continuation(
         if cls.get("is_target") and not comp.get("people_extracted") and domain not in all_contact_domains:
             unused_targets.append(domain)
 
-    # 4. Build keyword_start_pages from leaderboard
+    # 4. Build keyword intelligence from leaderboard + filter snapshot
     leaderboard = last_run.get("keyword_leaderboard", [])
     keyword_start_pages = {}
     exhausted_keywords = []
-    for entry in leaderboard:
+    fired_keywords = set()
+
+    # Sort leaderboard by quality_score — best performers first
+    sorted_lb = sorted(leaderboard, key=lambda x: -x.get("quality_score", 0))
+    for entry in sorted_lb:
         kw = entry.get("filter_value", "")
+        fired_keywords.add(kw)
         if entry.get("next_page"):
             keyword_start_pages[kw] = entry["next_page"]
         elif entry.get("exhausted"):
@@ -856,6 +861,19 @@ async def pipeline_prepare_continuation(
     # 5. Get filters from last run
     filter_snapshots = last_run.get("filter_snapshots", [])
     last_filters = filter_snapshots[-1].get("filters", {}) if filter_snapshots else {}
+
+    # Identify NEVER-FIRED keywords — generated but cap hit before they ran
+    # These are gold: completely untouched, zero credits spent
+    all_keywords = last_filters.get("keywords", [])
+    never_fired = [k for k in all_keywords if k not in fired_keywords and k not in exhausted_keywords]
+
+    # Build OPTIMIZED keyword order for continuation:
+    # 1. Never-fired (fresh, zero cost so far)
+    # 2. Best performers with more pages (proven high target_rate)
+    # 3. Remaining with more pages
+    best_with_pages = [e["filter_value"] for e in sorted_lb
+                       if e.get("next_page") and e.get("quality_score", 0) > 0]
+    optimized_keywords = never_fired + best_with_pages
 
     # 6. Compute dynamic scaling — read target_rate from actual company data
     last_totals = last_run.get("totals", {})
@@ -906,7 +924,15 @@ async def pipeline_prepare_continuation(
                 "estimated_contacts": len(unused_targets) * contacts_per_company,
             },
             "continuation_filters": last_filters,
-            "keyword_start_pages": keyword_start_pages,
+            "optimized_keywords": optimized_keywords,  # ORDERED: never-fired first, then best performers
+            "keyword_start_pages": keyword_start_pages,  # {kw: page} for keywords that need page 2+
+            "keyword_stats": {
+                "total_generated": len(all_keywords),
+                "fired": len(fired_keywords),
+                "never_fired": len(never_fired),
+                "exhausted": len(exhausted_keywords),
+                "has_more_pages": len(best_with_pages),
+            },
             "exhausted_keywords": exhausted_keywords,
             "seen_domains_count": len(seen_domains),
             "dynamic_scaling": {

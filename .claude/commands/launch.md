@@ -1352,13 +1352,17 @@ else:
     # Enrich unused targets first, reduce remaining KPI
     # ... (call pipeline_people_to_push with include_domains for the partial batch)
   
-  # 3b. Gather new companies with page continuation
+  # 3b. Gather new companies — OPTIMIZED keyword order
+  # pipeline_prepare_continuation returns optimized_keywords:
+  #   1. Never-fired keywords (fresh, zero cost, untouched Apollo data)
+  #   2. Best performers from leaderboard (proven high target_rate, page 2+)
+  # This ensures max new companies per credit spent.
   pipeline_gather_and_scrape(
-    keywords=state.data.continuation_filters.keywords,
+    keywords=state.data.optimized_keywords,               # NOT all keywords — OPTIMIZED order
     industry_tag_ids=state.data.continuation_filters.industry_tag_ids,
     locations=state.data.continuation_filters.locations,
     employee_ranges=state.data.continuation_filters.employee_ranges,
-    keyword_start_pages=state.data.keyword_start_pages,  # skip fetched pages
+    keyword_start_pages=state.data.keyword_start_pages,   # page 2+ for fired keywords
     max_companies=state.data.dynamic_scaling.max_companies,
     max_credits=state.data.dynamic_scaling.max_credits,
     project=project_slug,
