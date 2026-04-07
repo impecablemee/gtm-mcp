@@ -1423,6 +1423,29 @@ async def pipeline_people_to_push(
     # Read final totals from run file (authoritative after save_contacts)
     final_totals = run_data.get("totals", {})
 
+    # Compute CAMPAIGN totals across ALL runs (so agent shows full breakdown)
+    campaign_totals = {"probe": 0, "search": 0, "people": 0, "total": 0,
+                       "contacts": 0, "per_run": []}
+    camp_data = workspace.load(project, f"campaigns/{campaign_slug}/campaign.yaml") if campaign_slug else None
+    camp_run_ids = (camp_data or {}).get("run_ids", [run_id])
+    for rid in camp_run_ids:
+        rd = workspace.load(project, f"runs/{rid}.json")
+        if rd:
+            rt = rd.get("totals", {})
+            rp = rt.get("total_credits_probe", 0)
+            rs = rt.get("total_credits_search", 0)
+            rpe = rt.get("total_credits_people", 0)
+            rtot = rt.get("total_credits", 0)
+            rc = rt.get("contacts_extracted", 0)
+            campaign_totals["probe"] += rp
+            campaign_totals["search"] += rs
+            campaign_totals["people"] += rpe
+            campaign_totals["total"] += rtot
+            campaign_totals["contacts"] += rc
+            campaign_totals["per_run"].append({
+                "run_id": rid, "probe": rp, "search": rs, "people": rpe, "total": rtot, "contacts": rc,
+            })
+
     return {
         "success": True,
         "data": {
@@ -1430,17 +1453,18 @@ async def pipeline_people_to_push(
             "contacts": len(contacts),
             "people_credits": people_credits,
             "total_credits": final_totals.get("total_credits", 0),
-            "credits_breakdown": final_totals.get("credits_breakdown", {
+            "credits_breakdown": {
                 "probe": final_totals.get("total_credits_probe", 0),
                 "search": final_totals.get("total_credits_search", 0),
                 "people": people_credits,
-            }),
+            },
             "kpi_met": len(contacts) >= run_data.get("kpi", {}).get("target_people", 100),
             "campaign_id": campaign_id,
             "campaign_slug": campaign_slug,
             "leads_uploaded": leads_uploaded,
             "sheet_url": sheet_url,
             "mode": mode,
+            "campaign_totals": campaign_totals,  # full breakdown across all runs
         },
     }
 
