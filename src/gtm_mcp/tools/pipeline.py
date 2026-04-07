@@ -126,15 +126,17 @@ async def pipeline_probe(
                     "industry": c.get("industry", ""),
                     "industry_tag_id": c.get("industry_tag_id", ""),
                     "employee_count": c.get("employee_count"),
-                    "employee_range": c.get("employee_range", ""),
                     "country": c.get("country", ""),
                     "city": c.get("city", ""),
                     "state": c.get("state", ""),
                     "founded_year": c.get("founded_year"),
                     "linkedin_url": c.get("linkedin_url", ""),
-                    "short_description": c.get("short_description", ""),
+                    "keywords": c.get("keywords", []),
                     "funding_stage": c.get("funding_stage", ""),
-                    "revenue": c.get("revenue", ""),
+                    "revenue": c.get("organization_revenue") or c.get("revenue", ""),
+                    "phone": c.get("sanitized_phone", "") or c.get("phone", ""),
+                    "headcount_6m_growth": c.get("organization_headcount_six_month_growth"),
+                    "headcount_12m_growth": c.get("organization_headcount_twelve_month_growth"),
                 },
                 "discovery": {"found_by": f"{filter_type}:{filter_value}", "probe": True},
             }
@@ -195,7 +197,7 @@ async def pipeline_probe(
         # Tagged with _from_probe so gather merge preserves them
         if not run_data.get("requests"):
             run_data["requests"] = [
-                {"type": b["type"], "filter_value": b["name"], "page": 1, "_from_probe": True,
+                {"type": b["type"], "filter_value": b["name"], "page": 1, "funded": False, "_from_probe": True,
                  "result": {"credits_used": 1, "raw_returned": b["total"], "new_unique": b["companies"]}}
                 for b in breakdown
             ]
@@ -375,6 +377,8 @@ async def pipeline_gather_and_scrape(
                         break
                     seen_domains.add(domain)
                     new_unique += 1
+                    # Apollo search returns sparse data with non-standard keys.
+                    # Map what's available; enrichment backfills the rest for targets.
                     companies[domain] = {
                         "domain": domain,
                         "name": c.get("name", ""),
@@ -383,18 +387,17 @@ async def pipeline_gather_and_scrape(
                             "industry": c.get("industry", ""),
                             "industry_tag_id": c.get("industry_tag_id", ""),
                             "employee_count": c.get("employee_count"),
-                            "employee_range": c.get("employee_range", ""),
                             "country": c.get("country", ""),
                             "city": c.get("city", ""),
                             "state": c.get("state", ""),
                             "founded_year": c.get("founded_year"),
                             "linkedin_url": c.get("linkedin_url", ""),
-                            "short_description": c.get("short_description", ""),
                             "keywords": c.get("keywords", []),
                             "funding_stage": c.get("funding_stage", ""),
-                            "funding_amount": c.get("funding_amount"),
-                            "revenue": c.get("revenue", ""),
-                            "phone": c.get("phone", ""),
+                            "revenue": c.get("organization_revenue") or c.get("revenue", ""),
+                            "phone": c.get("sanitized_phone", "") or c.get("phone", ""),
+                            "headcount_6m_growth": c.get("organization_headcount_six_month_growth"),
+                            "headcount_12m_growth": c.get("organization_headcount_twelve_month_growth"),
                         },
                         "discovery": {
                             "found_by": f"{filter_type}:{filter_value}",
