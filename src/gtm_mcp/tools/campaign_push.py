@@ -38,6 +38,7 @@ async def campaign_push(
         smartlead_create_campaign,
         smartlead_set_sequence,
         smartlead_add_leads,
+        smartlead_export_leads,
         smartlead_send_test_email,
     )
 
@@ -98,7 +99,18 @@ async def campaign_push(
     if total_uploaded == 0:
         logger.error("Lead upload FAILED after 3 attempts — %d leads lost", len(all_leads))
 
-    logger.info("Uploaded %d/%d leads", total_uploaded, len(all_leads))
+    # Verify actual count from SmartLead (timeout ≠ failure — SmartLead may have processed it)
+    try:
+        verify_result = await smartlead_export_leads(campaign_id, config=config)
+        if verify_result.get("success"):
+            actual_count = len(verify_result.get("data", {}).get("leads", []))
+            if actual_count > total_uploaded:
+                logger.info("SmartLead verification: %d actual vs %d tracked — correcting", actual_count, total_uploaded)
+                total_uploaded = actual_count
+    except Exception as e:
+        logger.warning("SmartLead verification failed: %s — using tracked count", e)
+
+    logger.info("Uploaded %d/%d leads (verified)", total_uploaded, len(all_leads))
 
     # 4. Send test email
     test_sent = False
