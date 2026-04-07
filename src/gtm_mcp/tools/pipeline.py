@@ -1364,17 +1364,36 @@ async def pipeline_people_to_push(
         return {"success": False, "error": "mode='append' requires existing_campaign_id",
                 "step": "campaign_push", "contacts_saved": len(contacts)}
     elif mode == "append":
-        from gtm_mcp.tools.smartlead import smartlead_add_leads
-        # Single API call with retry — SmartLead upload is FREE, never lose contacts
+        from gtm_mcp.tools.smartlead import smartlead_add_leads, smartlead_export_leads
         campaign_id = existing_campaign_id
+        # DETERMINISTIC dedup: fetch actual emails from SmartLead, remove duplicates BEFORE push
+        existing_emails_sl = set()
+        try:
+            export = await smartlead_export_leads(existing_campaign_id, config=config)
+            if export.get("success"):
+                for lead in export.get("data", {}).get("leads", []):
+                    email = lead.get("email", "").lower()
+                    if email:
+                        existing_emails_sl.add(email)
+                logger.info("Fetched %d existing emails from SmartLead for dedup", len(existing_emails_sl))
+        except Exception:
+            pass
+        before_dedup = len(leads)
+        if existing_emails_sl:
+            leads = [l for l in leads if l.get("email", "").lower() not in existing_emails_sl]
+            if before_dedup != len(leads):
+                logger.info("Deduped %d → %d leads (removed %d already in SmartLead)",
+                           before_dedup, len(leads), before_dedup - len(leads))
+        # Single API call with retry — SmartLead upload is FREE, never lose contacts
         leads_uploaded = 0
-        for attempt in range(3):
-            add_result = await smartlead_add_leads(existing_campaign_id, leads, config=config)
-            if add_result.get("success"):
-                leads_uploaded = len(leads)
-                break
-            if attempt < 2:
-                await asyncio.sleep(3 * (attempt + 1))
+        if leads:
+            for attempt in range(3):
+                add_result = await smartlead_add_leads(existing_campaign_id, leads, config=config)
+                if add_result.get("success"):
+                    leads_uploaded = len(leads)
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(3 * (attempt + 1))
         if leads_uploaded > 0:
             # Update campaign.yaml
             import re
