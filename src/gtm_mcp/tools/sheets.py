@@ -269,18 +269,52 @@ async def sheets_export_contacts(
             campaign_slug or str((campaign_data or {}).get("campaign_id", "")),
         ])
 
+    # Dynamically remove columns where ALL rows are empty
+    if rows:
+        num_cols = len(CONTACT_HEADERS)
+        keep_cols = []
+        for col_idx in range(num_cols):
+            has_data = any(
+                row[col_idx] if col_idx < len(row) else ""
+                for row in rows
+            )
+            if has_data:
+                keep_cols.append(col_idx)
+
+        if len(keep_cols) < num_cols:
+            filtered_headers = [CONTACT_HEADERS[i] for i in keep_cols]
+            filtered_rows = [[row[i] if i < len(row) else "" for i in keep_cols] for row in rows]
+            dropped = [CONTACT_HEADERS[i] for i in range(num_cols) if i not in keep_cols]
+            logger.info("Dropped %d empty columns: %s", len(dropped), dropped)
+        else:
+            filtered_headers = list(CONTACT_HEADERS)
+            filtered_rows = rows
+    else:
+        filtered_headers = list(CONTACT_HEADERS)
+        filtered_rows = rows
+
+    # Write headers (overwrite row 1 with filtered headers)
+    sheets_svc.spreadsheets().values().update(
+        spreadsheetId=sheet_id,
+        range="Sheet1!A1",
+        valueInputOption="RAW",
+        body={"values": [filtered_headers]},
+    ).execute()
+
     try:
         sheets_svc.spreadsheets().values().append(
             spreadsheetId=sheet_id,
             range="Sheet1!A2",
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
-            body={"values": rows},
+            body={"values": filtered_rows},
         ).execute()
 
         return {"success": True, "data": {
             "sheet_id": sheet_id, "sheet_url": sheet_url,
-            "contacts_exported": len(rows), "project": project,
+            "contacts_exported": len(filtered_rows), "project": project,
+            "columns": len(filtered_headers),
+            "dropped_columns": [CONTACT_HEADERS[i] for i in range(len(CONTACT_HEADERS)) if i not in keep_cols] if rows else [],
         }}
     except Exception as exc:
         logger.error("sheets_export_contacts failed: %s", exc)
