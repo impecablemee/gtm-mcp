@@ -732,6 +732,9 @@ num_agents = 0 if count < 30 else min(2 + (count - 30) // 100, 5)
 chunk_size = count // num_agents if num_agents > 0 else count
 ```
 
+**ALL intermediate files go to `tmp/` dir** — scrape chunks, classify chunks, debug data.
+Keeps project root clean. `tmp/` is kept for debugging, never auto-deleted.
+
 **CRITICAL: Each agent writes to its OWN chunk file, NOT the run file.**
 
 Run #3 lost 45 of 73 targets because 4 agents wrote to the same run file concurrently.
@@ -757,7 +760,7 @@ Agent(
     - NEVER write generic reasoning like 'B2B company in PAYMENTS segment' — cite WHAT they do from website
 
     SAVE TO CHUNK FILE (NOT the run file!):
-      save_data('{project}', 'classify_chunk_{N}.json',
+      save_data('{project}', 'tmp/classify_chunk_{N}.json',
         {domain: {classification: {is_target, confidence, segment, reasoning}, name_normalized: cleaned_name}})
 
     COMPANIES ({chunk_size}):
@@ -779,7 +782,7 @@ Agent(
 # Orchestrator merges — NOT agents. Zero race condition.
 all_classified = {}
 for i in range(1, num_agents + 1):
-  chunk = load_data(project, f"classify_chunk_{i}.json")
+  chunk = load_data(project, f"tmp/classify_chunk_{i}.json")
   if chunk.success:
     all_classified.update(chunk.data)
     
