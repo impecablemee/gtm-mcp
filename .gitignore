@@ -34,3 +34,6 @@ Thumbs.db
 *.xlsx
 plans/
 requirements/
+
+# Test pipeline artifacts
+test/
