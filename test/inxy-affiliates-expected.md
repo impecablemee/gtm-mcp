@@ -76,7 +76,7 @@ existing leads. Agent auto-imports blacklist from 3137079. Zero questions about 
 - `pipeline_probe` with generated filters
 - Tests keyword quality: which keywords find companies similar to the 9 examples?
 - Returns target_rate, breakdown per keyword/industry
-- The 9 example companies themselves should appear in probe results (validation)
+- The 9 example companies MAY appear in probe results (nice validation, not required — Apollo may not index small affiliate networks)
 
 ### Phase 6: Cost Gate (Checkpoint 2)
 - Show estimated credits, target_rate, keyword breakdown
