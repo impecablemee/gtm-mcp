@@ -60,6 +60,14 @@ After run, verify: each phase starts within 5s of previous completing. Gaps > 30
 
 ## Parse Arguments
 
+**This command also handles "gather N more" / "add N contacts" / "find more" WITHOUT /launch.**
+If the user says "gather 50 more" in an existing conversation where a project + campaign exist:
+1. Detect: the user wants Mode 3 continuation
+2. Find the active project + campaign from context (state.yaml, or ask if ambiguous)
+3. Call `pipeline_prepare_continuation(project, campaign_ref, additional_kpi=50)`
+4. Follow the "Gather More" flow (see end of this document)
+This works whether user types `/launch campaign=X kpi=+50` OR just says "gather 50 more".
+
 ```
 Named params:
   project=<slug>        → Mode 2 (new campaign on existing project)
@@ -347,7 +355,11 @@ save_data(project, "project.yaml", {
 
 **Generate filters** from offer + taxonomy + example seeds:
 - Pick 2-3 industry tag_ids (SPECIFIC > BROAD, informed by example enrichment)
-- Generate **80-100 keywords minimum** (product names, not generic terms, seeded from examples)
+- Generate **150-200 keywords** (product names, not generic terms, seeded from examples)
+  Keywords are FREE (LLM generation, zero Apollo cost). Generate a LARGE pool upfront.
+  Only ~40-60 keywords fire per round (max_companies cap). The rest are saved for
+  "gather more" continuation — the deterministic pipeline uses them without LLM.
+  More keywords upfront = more rounds possible without keyword regeneration.
 - Map locations and employee sizes
 
 **CRITICAL: Generate at least `min_keywords` keywords (from Dynamic Scaling section).** Keywords are FREE (LLM generation). Each keyword fires a separate Apollo request discovering different companies. More keywords = more unique companies. The cost is per-page (1 credit each), but most keywords exhaust in 1 page. The `max_companies` cap stops gathering long before all keywords are used. For KPI=100 at 77% target rate: ~30 keywords. For KPI=200 at 40%: ~88 keywords. Always scale to KPI.
@@ -1381,6 +1393,26 @@ else:
 **Key benefits:**
 - `pipeline_prepare_continuation` computes EVERYTHING the agent needs (zero math)
 - Phase 0 = zero search credits (just people enrichment on pre-classified targets)
+- `optimized_keywords` = never-fired first, then best performers — max companies per credit
 - `keyword_start_pages` skips already-fetched pages
 - `max_credits` enforces budget
 - `exclude_emails` deduplicates against existing campaign contacts
+
+### When to regenerate keywords (LLM — rare)
+
+**Only when `pipeline_prepare_continuation` returns `keyword_stats.never_fired == 0 AND keyword_stats.has_more_pages == 0`.**
+This means ALL keywords are exhausted — every keyword has been tried on all available pages.
+
+In practice this is rare: 150-200 keywords × 3-5 pages each = 450-1000 potential Apollo requests.
+At ~100 companies per round, you need 3-5 rounds to exhaust everything.
+
+If exhausted:
+1. `pipeline_prepare_continuation` sets `keywords_exhausted: true` in the response
+2. Agent uses quality-gate skill's 10 regen angles to generate 50 NEW keywords from:
+   - Apollo keywords found on TARGET companies (reverse-engineer what works)
+   - Adjacent product terms not yet tried
+   - Competitor/alternative product names
+3. Save new keywords to filter_snapshot (append, don't overwrite)
+4. Run gather with the new keywords
+
+**This is the ONLY moment LLM is needed for keywords after the initial generation.**
