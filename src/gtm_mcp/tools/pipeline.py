@@ -19,6 +19,35 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _recover_run_data(run_data: dict) -> dict:
+    """Recover from agent save_data(mode='write') overwrites.
+
+    Pipeline tools save to protected keys (probe_companies, gather_companies,
+    gather_requests). If agent overwrites 'companies' or 'requests' with empty
+    data, this restores from the protected copies. Called before any read.
+    """
+    # Recover companies
+    companies = run_data.get("companies", {})
+    if not companies or len(companies) == 0:
+        # Try protected keys in priority order
+        for key in ("gather_companies", "probe_companies"):
+            protected = run_data.get(key, {})
+            if protected and len(protected) > 0:
+                run_data["companies"] = protected
+                logger.info("Recovered %d companies from %s", len(protected), key)
+                break
+
+    # Recover requests
+    requests = run_data.get("requests", [])
+    if not requests or len(requests) == 0:
+        protected = run_data.get("gather_requests", [])
+        if protected:
+            run_data["requests"] = protected
+            logger.info("Recovered %d requests from gather_requests", len(protected))
+
+    return run_data
+
+
 async def pipeline_probe(
     keywords: list[str],
     industry_tag_ids: list[str],
@@ -155,11 +184,21 @@ async def pipeline_probe(
         }
         run_data["probe_companies"] = probe_companies_dict  # survives agent overwrite
         run_data["companies"] = {**run_data.get("companies", {}), **probe_companies_dict}
+        # Probe credits also count as search credits (probe IS the search when gather is skipped)
         run_data["totals"] = {
             **run_data.get("totals", {}),
             "total_credits_probe": credits_used,
+            "total_credits_search": credits_used,  # probe = search when gather skipped; gather overwrites if called
             "total_credits": credits_used,
         }
+        # Save probe requests so leaderboard works even without gather
+        # Tagged with _from_probe so gather merge preserves them
+        if not run_data.get("requests"):
+            run_data["requests"] = [
+                {"type": b["type"], "filter_value": b["name"], "page": 1, "_from_probe": True,
+                 "result": {"credits_used": 1, "raw_returned": b["total"], "new_unique": b["companies"]}}
+                for b in breakdown
+            ]
         workspace.save(project, run_path, run_data)
 
     return {
@@ -225,26 +264,60 @@ async def pipeline_gather_and_scrape(
             seen_domains.update(bl_data)
             logger.info("Loaded %d blacklisted domains for project %s", len(bl_data), project)
     # Load existing companies from run file (probe phase saves here first)
-    # This prevents re-discovering + re-scraping probe companies
-    # Check BOTH "companies" and "probe_companies" (probe_companies survives agent overwrite)
-    if workspace and project and run_id:
-        existing_run = workspace.load(project, f"runs/{run_id}.json")
-        if existing_run:
-            existing_domains = set()
-            if isinstance(existing_run.get("companies"), dict):
-                existing_domains.update(existing_run["companies"].keys())
-            if isinstance(existing_run.get("probe_companies"), dict):
-                existing_domains.update(existing_run["probe_companies"].keys())
-            if existing_domains:
-                seen_domains.update(existing_domains)
-                logger.info("Loaded %d existing domains from run file (probe/previous)", len(existing_domains))
+    # --- DETERMINISTIC: Load all prior state from run files (agent can't mess this up) ---
+    _probe_unscraped: list[str] = []
+    _probe_companies_data: dict[str, dict] = {}
+    _auto_start_pages: dict[str, int] = {}  # computed from ALL run requests
+
+    if workspace and project:
+        project_dir = workspace.base / "projects" / project
+        runs_dir = project_dir / "runs"
+
+        # Scan ALL run files to build complete seen_domains + keyword page history
+        if runs_dir.exists():
+            import json as _json
+            for rf in sorted(runs_dir.glob("run-*.json")):
+                try:
+                    rd = _json.loads(rf.read_text())
+                except Exception:
+                    continue
+                # Collect all domains from all runs (dedup across runs)
+                for key in ("companies", "probe_companies"):
+                    if isinstance(rd.get(key), dict):
+                        for d, c in rd[key].items():
+                            seen_domains.add(d)
+                            # For CURRENT run: track probe companies for scraping
+                            if rf.stem == run_id:
+                                if d not in _probe_companies_data:
+                                    _probe_companies_data[d] = c
+                                if c.get("scrape", {}).get("status") in ("not_scraped", None):
+                                    if d not in _probe_unscraped:
+                                        _probe_unscraped.append(d)
+                # Build keyword page map from ALL runs' requests
+                for req in rd.get("requests", []):
+                    kw = req.get("filter_value", "")
+                    page = req.get("page", 1)
+                    if kw and page >= _auto_start_pages.get(kw, 0):
+                        _auto_start_pages[kw] = page + 1  # next page to fetch
+
+            if seen_domains:
+                logger.info("Loaded %d seen domains from %d run files, %d keyword start pages",
+                           len(seen_domains), len(list(runs_dir.glob("run-*.json"))),
+                           len(_auto_start_pages))
 
     companies: dict[str, dict] = {}
+    # Pre-populate companies with probe data (so scrape results update them)
+    for d, c in _probe_companies_data.items():
+        companies[d] = c
     requests: list[dict] = []
     scrape_queue: asyncio.Queue = asyncio.Queue()
     scrape_results: dict[str, dict] = {}
     gather_done = asyncio.Event()
     req_counter = 0
+    # max_companies means NEW companies to find (on top of existing)
+    # Offset seen_domains count so the cap applies to new discoveries only
+    _seen_before_gather = len(seen_domains)
+    _effective_max = _seen_before_gather + max_companies
 
     # --- Phase 1: Apollo gather (CONTROLLED concurrency, feeds scrape queue) ---
     # Semaphore limits concurrent Apollo API calls. Without this, asyncio.gather
@@ -253,21 +326,23 @@ async def pipeline_gather_and_scrape(
     # req_counter and seen_domains are updated, so the next batch can stop early.
     _apollo_sem = asyncio.Semaphore(10)
 
-    _start_pages = keyword_start_pages or {}
+    # DETERMINISTIC: merge agent-provided start pages with auto-computed from run history
+    # Auto-computed wins (it's from actual data), agent value is fallback for edge cases
+    _start_pages = {**(keyword_start_pages or {}), **_auto_start_pages}
 
     async def search_one(filter_type: str, filter_value: str, funded: bool = False):
         nonlocal req_counter
         start = _start_pages.get(filter_value, 1)
         for page in range(start, start + max_pages_per_stream):
             # Check BEFORE acquiring semaphore (fast exit for late coroutines)
-            if len(seen_domains) >= max_companies:
+            if len(seen_domains) >= _effective_max:
                 return
             if max_credits is not None and max_credits > 0 and req_counter >= max_credits:
                 return
 
             async with _apollo_sem:
                 # Re-check AFTER acquiring semaphore (counters updated while waiting)
-                if len(seen_domains) >= max_companies:
+                if len(seen_domains) >= _effective_max:
                     return
                 if max_credits is not None and max_credits > 0 and req_counter >= max_credits:
                     return
@@ -296,7 +371,7 @@ async def pipeline_gather_and_scrape(
                     domain = c.get("primary_domain", "") or c.get("domain", "")
                     if not domain or domain in seen_domains:
                         continue
-                    if len(seen_domains) >= max_companies:
+                    if len(seen_domains) >= _effective_max:
                         break
                     seen_domains.add(domain)
                     new_unique += 1
@@ -367,6 +442,11 @@ async def pipeline_gather_and_scrape(
     _gather_completed_at: list = []  # mutable container for closure
 
     async def run_gather():
+        # Feed unscraped probe companies into scrape queue FIRST
+        for d in _probe_unscraped:
+            await scrape_queue.put(d)
+        if _probe_unscraped:
+            logger.info("Queued %d unscraped probe companies for scraping", len(_probe_unscraped))
         await asyncio.gather(*gather_tasks, return_exceptions=True)
         _gather_completed_at.append(datetime.now(timezone.utc))  # FIX #3: timestamp before scrape finishes
         # Send sentinel values to stop workers
@@ -439,17 +519,23 @@ async def pipeline_gather_and_scrape(
     }
 
     # Auto-save companies + requests to run file (if project + run_id provided)
-    # This ensures scrape metadata + discovery provenance persist even if agent
-    # fails to save. Classification agents later MERGE into these company records.
+    # PROTECTED: saves to BOTH "companies" AND "gather_companies" (survives agent overwrite)
+    # Same pattern as probe_companies — agent can't destroy this data.
     if project and run_id and workspace:
         run_path = f"runs/{run_id}.json"
         existing_run = workspace.load(project, run_path) or {}
         existing_run["companies"] = response_companies
-        existing_run["requests"] = requests
+        existing_run["gather_companies"] = response_companies  # survives save_data(mode="write")
+        # Merge requests: keep probe requests, add gather requests. Also save protected copy.
+        probe_requests = [r for r in existing_run.get("requests", []) if r.get("_from_probe")]
+        merged_requests = probe_requests + requests
+        existing_run["requests"] = merged_requests
+        existing_run["gather_requests"] = merged_requests  # survives save_data(mode="write")
         # Read probe credits from run file (agent saved them before calling this tool)
         probe_credits = existing_run.get("probe", {}).get("credits_used", 0)
         existing_run["totals"] = {
             **existing_run.get("totals", {}),
+            "rounds_completed": len(existing_run.get("rounds", [])) or 1,
             "total_api_requests": len(requests),
             "total_credits_probe": probe_credits,
             "total_credits_search": total_credits,
@@ -523,6 +609,7 @@ async def pipeline_compute_leaderboard(
     run_data = workspace.load(project, run_path)
     if not run_data:
         return {"success": False, "error": f"Run file {run_path} not found"}
+    run_data = _recover_run_data(run_data)
 
     requests = run_data.get("requests", [])
     companies = run_data.get("companies", {})
@@ -737,6 +824,7 @@ async def pipeline_save_contacts(
     run_data = workspace.load(project, run_path)
     if not run_data:
         return {"success": False, "error": f"Run file {run_path} not found"}
+    run_data = _recover_run_data(run_data)
 
     run_data["contacts"] = contacts
     kpi_target = run_data.get("kpi", {}).get("target_people", 100)
@@ -850,6 +938,7 @@ async def pipeline_prepare_continuation(
 
     if not last_run:
         return {"success": False, "error": f"No previous run found for project {project}"}
+    last_run = _recover_run_data(last_run)
 
     # 3. Count unused targets
     companies = last_run.get("companies", {})
@@ -866,20 +955,43 @@ async def pipeline_prepare_continuation(
         if cls.get("is_target") and not comp.get("people_extracted") and domain not in all_contact_domains:
             unused_targets.append(domain)
 
-    # 4. Build keyword intelligence from leaderboard + filter snapshot
+    # 4. Build keyword intelligence from ALL run files (deterministic, not just leaderboard)
     leaderboard = last_run.get("keyword_leaderboard", [])
     keyword_start_pages = {}
     exhausted_keywords = []
     fired_keywords = set()
 
-    # Sort leaderboard by quality_score — best performers first
+    # DETERMINISTIC: scan ALL run files for request history (agent can't mess this up)
+    all_run_requests = []
+    if (project_dir / "runs").exists():
+        import json as _json
+        for rf in sorted((project_dir / "runs").glob("run-*.json")):
+            try:
+                rd = _json.loads(rf.read_text())
+                rd = _recover_run_data(rd)
+                all_run_requests.extend(rd.get("requests", []))
+            except Exception:
+                continue
+
+    # Build page map from actual requests across ALL runs
+    for req in all_run_requests:
+        kw = req.get("filter_value", "")
+        page = req.get("page", 1)
+        fired_keywords.add(kw)
+        if page >= keyword_start_pages.get(kw, 0):
+            keyword_start_pages[kw] = page + 1  # next page
+        # Mark exhausted if returned < 100 results
+        raw = req.get("result", {}).get("raw_returned", 100)
+        if raw < 100:
+            if kw not in exhausted_keywords:
+                exhausted_keywords.append(kw)
+
+    # Also use leaderboard data (may have quality_score info)
     sorted_lb = sorted(leaderboard, key=lambda x: -x.get("quality_score", 0))
     for entry in sorted_lb:
         kw = entry.get("filter_value", "")
         fired_keywords.add(kw)
-        if entry.get("next_page"):
-            keyword_start_pages[kw] = entry["next_page"]
-        elif entry.get("exhausted"):
+        if entry.get("exhausted") and kw not in exhausted_keywords:
             exhausted_keywords.append(kw)
 
     # 5. Get filters from last run
@@ -893,11 +1005,13 @@ async def pipeline_prepare_continuation(
 
     # Build OPTIMIZED keyword order for continuation:
     # 1. Never-fired (fresh, zero cost so far)
-    # 2. Best performers with more pages (proven high target_rate)
-    # 3. Remaining with more pages
-    best_with_pages = [e["filter_value"] for e in sorted_lb
-                       if e.get("next_page") and e.get("quality_score", 0) > 0]
-    optimized_keywords = never_fired + best_with_pages
+    # 2. Keywords with more pages (not exhausted, already proven productive)
+    exhausted_set = set(exhausted_keywords)
+    has_more_pages = [kw for kw in fired_keywords if kw not in exhausted_set]
+    # Sort by quality_score from leaderboard if available
+    lb_scores = {e.get("filter_value", ""): e.get("quality_score", 0) for e in sorted_lb}
+    has_more_pages.sort(key=lambda kw: -lb_scores.get(kw, 0))
+    optimized_keywords = never_fired + has_more_pages
 
     # 6. Compute dynamic scaling — read target_rate from actual company data
     last_totals = last_run.get("totals", {})
@@ -955,7 +1069,7 @@ async def pipeline_prepare_continuation(
                 "fired": len(fired_keywords),
                 "never_fired": len(never_fired),
                 "exhausted": len(exhausted_keywords),
-                "has_more_pages": len(best_with_pages),
+                "has_more_pages": len(has_more_pages),
             },
             "exhausted_keywords": exhausted_keywords,
             "seen_domains_count": len(seen_domains),
@@ -1020,6 +1134,7 @@ async def pipeline_people_to_push(
     run_data = workspace.load(project, run_path)
     if not run_data:
         return {"success": False, "error": f"Run file {run_path} not found"}
+    run_data = _recover_run_data(run_data)
 
     companies = run_data.get("companies", {})
 
@@ -1106,8 +1221,9 @@ async def pipeline_people_to_push(
         logger.info("pipeline_people_to_push: deduped %d → %d contacts (excluded %d campaign emails)",
                      before, len(contacts), before - len(contacts))
 
-    people_credits = len(contacts)
-    logger.info("pipeline_people_to_push: %d contacts enriched (%d credits)", len(contacts), people_credits)
+    # Credits = person IDs sent to enrich (you pay per request, not per email returned)
+    people_credits = len(all_person_ids)
+    logger.info("pipeline_people_to_push: %d contacts from %d enrichment requests (%d credits)", len(contacts), people_credits, people_credits)
 
     # 3b. Backfill company apollo_data from enrichment org_data
     # Apollo search returns sparse data (null for most fields).
@@ -1139,12 +1255,32 @@ async def pipeline_people_to_push(
     run_data = workspace.load(project, run_path) or run_data
 
     # 5. Google Sheet export (optional)
+    # On append: reuse existing sheet_id from campaign.yaml (so URL stays the same)
     sheet_url = ""
     if create_sheet and contacts:
         from gtm_mcp.tools.sheets import sheets_export_contacts
-        sheet_result = await sheets_export_contacts(project, config=config, workspace=workspace)
+        existing_sheet_id = ""
+        if mode == "append" and existing_campaign_id:
+            # Find campaign.yaml to get sheet_id
+            import re as _re
+            slug_guess = _re.sub(r"[^a-z0-9]+", "-", campaign_name.lower()).strip("-")
+            camp_data = workspace.load(project, f"campaigns/{slug_guess}/campaign.yaml")
+            if camp_data:
+                existing_sheet_id = camp_data.get("sheet_id", "")
+        sheet_result = await sheets_export_contacts(
+            project, sheet_id=existing_sheet_id, config=config, workspace=workspace)
         if sheet_result.get("success"):
             sheet_url = sheet_result["data"].get("sheet_url", "")
+            # Store sheet_id in campaign for future reuse
+            sheet_id_val = sheet_result["data"].get("sheet_id", "")
+            if sheet_id_val and mode == "create":
+                import re as _re
+                slug_guess = _re.sub(r"[^a-z0-9]+", "-", campaign_name.lower()).strip("-")
+                camp_data = workspace.load(project, f"campaigns/{slug_guess}/campaign.yaml")
+                if camp_data:
+                    camp_data["sheet_id"] = sheet_id_val
+                    camp_data["sheet_url"] = sheet_url
+                    workspace.save(project, f"campaigns/{slug_guess}/campaign.yaml", camp_data)
 
     # 6. Save leads file for push
     import json
@@ -1176,6 +1312,14 @@ async def pipeline_people_to_push(
             campaign_id = push_result["data"]["campaign_id"]
             campaign_slug = push_result["data"]["campaign_slug"]
             leads_uploaded = push_result["data"]["leads_uploaded"]
+            # Save sheet_id to campaign.yaml for future append reuse
+            if sheet_url:
+                camp_data = workspace.load(project, f"campaigns/{campaign_slug}/campaign.yaml")
+                if camp_data:
+                    sheet_id_from_url = sheet_url.split("/d/")[1].split("/")[0] if "/d/" in sheet_url else ""
+                    camp_data["sheet_id"] = sheet_id_from_url
+                    camp_data["sheet_url"] = sheet_url
+                    workspace.save(project, f"campaigns/{campaign_slug}/campaign.yaml", camp_data)
         else:
             logger.error("Campaign creation failed: %s", push_result.get("error"))
             return {"success": False, "error": f"Campaign creation failed: {push_result.get('error')}",

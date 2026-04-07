@@ -133,7 +133,7 @@ async def sheets_export_contacts(
 ) -> dict:
     """Export project contacts to a Google Sheet.
 
-    If sheet_id provided → append to existing sheet.
+    If sheet_id provided → clear and re-export ALL contacts (full replace, same URL).
     If not → create new sheet, return URL.
     If campaign_slug → filter contacts by that campaign's segment.
     """
@@ -294,6 +294,15 @@ async def sheets_export_contacts(
     else:
         filtered_headers = list(CONTACT_HEADERS)
         filtered_rows = rows
+
+    # Clear existing data first (prevents duplicates on re-export / append runs)
+    try:
+        sheets_svc.spreadsheets().values().clear(
+            spreadsheetId=sheet_id,
+            range="Sheet1",
+        ).execute()
+    except Exception:
+        pass  # OK if sheet is already empty
 
     # Write headers (overwrite row 1 with filtered headers)
     sheets_svc.spreadsheets().values().update(

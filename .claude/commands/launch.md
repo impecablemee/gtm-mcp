@@ -787,7 +787,11 @@ for i in range(1, num_agents + 1):
 run = load_data(project, f"runs/{run_id}.json")
 
 # Merge classifications INTO existing company records
+# NORMALIZE: agents sometimes output flat {is_target, ...} instead of {classification: {...}}
 for domain, cls_data in all_classified.items():
+  # Normalize flat → nested if needed
+  if "is_target" in cls_data and not isinstance(cls_data.get("classification"), dict):
+    cls_data = {"classification": cls_data}
   if domain in run.data.companies:
     run.data.companies[domain].update(cls_data)
   else:
