@@ -2,17 +2,17 @@
 
 ## Prompt
 ```
-/launch my blacklist is this campaign https://app.smartlead.ai/app/email-campaign/3137079/analytics
+/launch add more contacts to this campaign https://app.smartlead.ai/app/email-campaign/3137079/analytics
 I want to add more Affiliate networks to the given campaign and offer them inxy.io
-[9 example companies with domains listed]
+[9 example companies with URLs listed]
 ```
 
 ## What This Means
 - **Project**: NEW project (inxy or inxy-affiliates) — new offer, new ICP
 - **Offer**: inxy.io — proxy service for affiliate marketers
 - **Target campaign**: 3137079 — append new contacts here
-- **Blacklist**: same campaign 3137079 — don't re-contact existing leads
-- **9 example companies**: reference material for ICP extraction, NOT the final target list
+- **Blacklist**: AUTOMATIC from campaign 3137079 — don't re-contact existing leads. NOT ASKED.
+- **9 example companies**: reference material for ICP + filter seeding, NOT the final target list
 
 ## Expected Flow
 
