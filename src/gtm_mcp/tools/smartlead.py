@@ -599,7 +599,8 @@ async def smartlead_add_leads(campaign_id: int, leads: list[dict], *, config=Non
             "email": lead["email"],
             "first_name": lead.get("first_name", ""),
             "last_name": lead.get("last_name", ""),
-            "company_name": WorkspaceManager.normalize_company_name(lead.get("company_name", "")),
+            "company_name": WorkspaceManager.normalize_company_name(
+                lead.get("company_name") or lead.get("company_name_normalized") or lead.get("company_domain", "")),
         }
         if lead.get("custom_fields"):
             entry["custom_fields"] = lead["custom_fields"]

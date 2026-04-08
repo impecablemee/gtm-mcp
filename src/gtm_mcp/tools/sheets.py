@@ -265,7 +265,7 @@ async def sheets_export_contacts(
             c.get("email", ""),
             c.get("phone", "") or "",
             # Company
-            c.get("company_name_normalized", "") or cd.get("name", ""),
+            c.get("company_name_normalized") or c.get("company_name") or cd.get("name") or c.get("company_domain", ""),
             domain,
             company_location,
             cd.get("country", ""),

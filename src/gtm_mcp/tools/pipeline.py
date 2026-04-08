@@ -1553,7 +1553,7 @@ async def pipeline_people_to_push(
             "email": c["email"],
             "first_name": c.get("first_name", ""),
             "last_name": c.get("last_name", ""),
-            "company_name": c.get("company_name_normalized", ""),
+            "company_name": c.get("company_name_normalized") or c.get("company_name") or c.get("company_domain", ""),
             "linkedin_url": c.get("linkedin_url", ""),
             "phone": c.get("phone", ""),
         })
