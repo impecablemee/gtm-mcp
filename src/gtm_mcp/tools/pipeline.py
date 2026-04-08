@@ -140,7 +140,7 @@ async def pipeline_probe(
             new_count += 1
             all_companies[domain] = {
                 "domain": domain,
-                "name": c.get("name", ""),
+                "name": c.get("name") or "",
                 "apollo_id": c.get("apollo_id", "") or c.get("id", ""),
                 "apollo_data": {
                     "industry": c.get("industry", ""),
@@ -454,7 +454,7 @@ async def pipeline_gather_and_scrape(
                     # Map what's available; enrichment backfills the rest for targets.
                     companies[domain] = {
                         "domain": domain,
-                        "name": c.get("name", ""),
+                        "name": c.get("name") or "",
                         "apollo_id": c.get("apollo_id", "") or c.get("id", ""),
                         "apollo_data": {
                             "industry": c.get("industry", ""),
@@ -653,7 +653,7 @@ async def pipeline_gather_and_scrape(
     return {
         "success": True,
         "data": {
-            "companies": {d: {"name": c.get("name", ""), "scrape_status": c.get("scrape", {}).get("status", "unknown")}
+            "companies": {d: {"name": c.get("name") or "", "scrape_status": c.get("scrape", {}).get("status", "unknown")}
                           for d, c in companies.items()},
             "scraped_texts": {d: t[:200] + "..." if len(t) > 200 else t
                               for d, t in scraped_texts.items()},
@@ -1252,6 +1252,10 @@ async def pipeline_people_to_push(
     config = config or _default_config()
     workspace = workspace or _default_workspace()
 
+    # Derive campaign_slug early from campaign_name (needed for all path lookups)
+    import re as _re
+    campaign_slug = _re.sub(r"[^a-z0-9]+", "-", campaign_name.lower()).strip("-")
+
     # 1. Load targets from run file or use include_domains (Phase 0)
     run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
     run_data = workspace.load(project, run_path)
@@ -1332,8 +1336,8 @@ async def pipeline_people_to_push(
             "linkedin_url": person.get("linkedin_url", ""),
             "phone": person.get("phone", ""),
             "company_domain": domain,
-            "company_name_normalized": person.get("company_name", "")
-                or companies.get(domain, {}).get("name", ""),
+            "company_name_normalized": person.get("company_name") or
+                companies.get(domain, {}).get("name") or domain,
             "segment": companies.get(domain, {}).get(
                 "classification", {}).get("segment", segment),
             # Store org_data directly on contact — sheet uses this WITHOUT run file join
