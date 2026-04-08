@@ -67,6 +67,82 @@ def _campaign_path(base: str, campaign_slug: str = "") -> str:
     return base
 
 
+def _load_merged(workspace, project: str, base_path: str, campaign_slug: str = ""):
+    """Load from campaign path + project path, merge if both exist.
+
+    The agent may write to project-level (runs/run-001.json) while tools write
+    to campaign-level (campaigns/{slug}/runs/run-001.json). This merges both
+    so no data is lost regardless of where it was written.
+
+    For dicts (run files): deep-merge companies, preferring non-null values.
+    For lists (contacts): dedup by email, union from both sources.
+    """
+    camp_path = _campaign_path(base_path, campaign_slug) if campaign_slug else None
+    proj_path = base_path
+
+    data_camp = workspace.load(project, camp_path) if camp_path and camp_path != proj_path else None
+    data_proj = workspace.load(project, proj_path)
+
+    if not data_camp:
+        return data_proj
+    if not data_proj:
+        return data_camp
+
+    # Both exist — merge
+    if isinstance(data_camp, list) and isinstance(data_proj, list):
+        # Contacts: dedup by email, campaign wins
+        seen = set()
+        merged = []
+        for c in data_camp:
+            email = (c.get("email") or "").lower()
+            if email and email not in seen:
+                seen.add(email)
+                merged.append(c)
+        for c in data_proj:
+            email = (c.get("email") or "").lower()
+            if email and email not in seen:
+                seen.add(email)
+                merged.append(c)
+        return merged
+
+    if isinstance(data_camp, dict) and isinstance(data_proj, dict):
+        # Run file: start with project data, overlay campaign data (non-null wins)
+        merged = {**data_proj}
+        for k, v in data_camp.items():
+            if v is not None:
+                merged[k] = v
+
+        # Deep-merge companies dict — the critical case
+        camp_cos = data_camp.get("companies") or {}
+        proj_cos = data_proj.get("companies") or {}
+        if camp_cos or proj_cos:
+            merged_cos = {}
+            for d in set(list(camp_cos.keys()) + list(proj_cos.keys())):
+                cc = camp_cos.get(d) or {}
+                pc = proj_cos.get(d) or {}
+                # Per-field merge: project base, campaign non-null overlay
+                mc = {**pc}
+                for fk, fv in cc.items():
+                    if fv is not None:
+                        mc[fk] = fv
+                # Sub-dict merge for classification, apollo_data, scrape
+                for sub in ("classification", "apollo_data", "scrape"):
+                    cc_sub = (cc.get(sub) if isinstance(cc.get(sub), dict) else {}) or {}
+                    pc_sub = (pc.get(sub) if isinstance(pc.get(sub), dict) else {}) or {}
+                    if cc_sub or pc_sub:
+                        ms = {**pc_sub}
+                        for sk, sv in cc_sub.items():
+                            if sv is not None:
+                                ms[sk] = sv
+                        mc[sub] = ms
+                merged_cos[d] = mc
+            merged["companies"] = merged_cos
+
+        return merged
+
+    return data_camp
+
+
 async def pipeline_probe(
     keywords: list[str],
     industry_tag_ids: list[str],
@@ -232,7 +308,7 @@ async def pipeline_probe(
 
     if workspace and project and run_id:
         run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
-        run_data = workspace.load(project, run_path) or {}
+        run_data = _load_merged(workspace, project, f"runs/{run_id}.json", campaign_slug) or {}
         run_data["probe"] = {
             "credits_used": credits_used,
             "companies_from_probe": len(all_companies),
@@ -599,7 +675,7 @@ async def pipeline_gather_and_scrape(
     # Same pattern as probe_companies — agent can't destroy this data.
     if project and run_id and workspace:
         run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
-        existing_run = workspace.load(project, run_path) or {}
+        existing_run = _load_merged(workspace, project, f"runs/{run_id}.json", campaign_slug) or {}
         existing_run["companies"] = response_companies
         existing_run["gather_companies"] = response_companies  # survives save_data(mode="write")
         # Merge requests: keep probe requests, add gather requests. Also save protected copy.
@@ -692,7 +768,7 @@ async def pipeline_compute_leaderboard(
     workspace = workspace or _default_workspace()
 
     run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
-    run_data = workspace.load(project, run_path)
+    run_data = _load_merged(workspace, project, f"runs/{run_id}.json", campaign_slug)
     if not run_data:
         return {"success": False, "error": f"Run file {run_path} not found"}
     run_data = _recover_run_data(run_data)
@@ -820,7 +896,7 @@ async def pipeline_save_intelligence(
     workspace = workspace or _default_workspace()
 
     run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
-    run_data = workspace.load(project, run_path)
+    run_data = _load_merged(workspace, project, f"runs/{run_id}.json", campaign_slug)
     if not run_data:
         return {"success": False, "error": f"Run file not found"}
     run_data = _recover_run_data(run_data)
@@ -911,7 +987,7 @@ async def pipeline_save_contacts(
 
     # 2. Load run file, update contacts + totals, write back
     run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
-    run_data = workspace.load(project, run_path)
+    run_data = _load_merged(workspace, project, f"runs/{run_id}.json", campaign_slug)
     if not run_data:
         return {"success": False, "error": f"Run file {run_path} not found"}
     run_data = _recover_run_data(run_data)
@@ -1258,7 +1334,7 @@ async def pipeline_people_to_push(
 
     # 1. Load targets from run file or use include_domains (Phase 0)
     run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
-    run_data = workspace.load(project, run_path)
+    run_data = _load_merged(workspace, project, f"runs/{run_id}.json", campaign_slug)
     if not run_data:
         return {"success": False, "error": f"Run file {run_path} not found"}
     run_data = _recover_run_data(run_data)
@@ -1395,7 +1471,7 @@ async def pipeline_people_to_push(
                                  campaign_slug=_cs, workspace=workspace)
 
     # Reload run_data after save_contacts updated totals
-    run_data = workspace.load(project, run_path) or run_data
+    run_data = _load_merged(workspace, project, f"runs/{run_id}.json", campaign_slug) or run_data
 
     # 5. Google Sheet export (optional)
     # On append: reuse existing sheet_id from campaign.yaml (so URL stays the same)
@@ -1515,7 +1591,7 @@ async def pipeline_people_to_push(
                 workspace.save(project, f"campaigns/{slug}/campaign.yaml", existing_camp)
 
         # Update run file with campaign link
-        run_data = workspace.load(project, run_path) or {}
+        run_data = _load_merged(workspace, project, f"runs/{run_id}.json", campaign_slug) or {}
         run_data["campaign_id"] = campaign_id
         run_data["campaign_slug"] = campaign_slug
         from datetime import datetime, timezone as tz

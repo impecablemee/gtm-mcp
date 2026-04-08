@@ -140,64 +140,69 @@ async def sheets_export_contacts(
     config = config or _default_config()
     workspace = workspace or _default_workspace()
 
-    # Load contacts — campaign-level first, fall back to project-level
-    contacts = None
-    campaign_data = None
-    if campaign_slug:
-        contacts = workspace.load(project, f"campaigns/{campaign_slug}/contacts.json")
-        campaign_data = workspace.load(project, f"campaigns/{campaign_slug}/campaign.yaml")
-    if not contacts:
-        contacts = workspace.load(project, "contacts.json")  # legacy fallback
-        if contacts and campaign_data and campaign_data.get("segment"):
-            contacts = [c for c in contacts if c.get("segment") == campaign_data["segment"]]
+    # Load contacts — merge campaign-level + project-level (agent may write to either)
+    contacts_camp = workspace.load(project, f"campaigns/{campaign_slug}/contacts.json") if campaign_slug else None
+    contacts_proj = workspace.load(project, "contacts.json")
+    campaign_data = workspace.load(project, f"campaigns/{campaign_slug}/campaign.yaml") if campaign_slug else None
+
+    # Merge contacts: dedup by email, campaign wins
+    contacts = []
+    _seen_emails: set = set()
+    for src in [contacts_camp, contacts_proj]:
+        if not src:
+            continue
+        for c in src:
+            email = (c.get("email") or "").lower()
+            if email and email not in _seen_emails:
+                _seen_emails.add(email)
+                contacts.append(c)
+    # Filter by segment if project-level contacts mixed across campaigns
+    if contacts and campaign_data and campaign_data.get("segment") and not contacts_camp:
+        contacts = [c for c in contacts if c.get("segment") == campaign_data["segment"]]
     if not contacts:
         return {"success": False, "error": f"No contacts found for {campaign_slug or project}"}
 
-    # Join with run file companies to get classification + apollo_data
+    # Join with run file companies — MERGE from both campaign + project level
+    # Agent writes classification to one path, tools write to the other.
     company_data: dict[str, dict] = {}  # domain → {apollo_data, classification}
-    run_ids = (campaign_data or {}).get("run_ids", [])
-    if not run_ids and campaign_slug:
-        # Scan campaign-level runs
+
+    # Collect run_ids from campaign dir + project dir
+    run_ids = set((campaign_data or {}).get("run_ids", []))
+    if campaign_slug:
         campaign_runs_dir = workspace._project_dir(project) / "campaigns" / campaign_slug / "runs"
         if campaign_runs_dir.exists():
-            run_files = sorted(campaign_runs_dir.glob("run-*.json"))
-            if run_files:
-                run_ids = [rf.stem for rf in run_files]
-    if not run_ids:
-        # Legacy: scan project-level runs
-        runs_dir = workspace._project_dir(project) / "runs"
-        if runs_dir.exists():
-            run_files = sorted(runs_dir.glob("run-*.json"))
-            if run_files:
-                run_ids = [run_files[-1].stem]
+            run_ids.update(rf.stem for rf in campaign_runs_dir.glob("run-*.json"))
+    runs_dir = workspace._project_dir(project) / "runs"
+    if runs_dir.exists():
+        run_ids.update(rf.stem for rf in runs_dir.glob("run-*.json"))
 
-    for run_id in run_ids:
-        # Try campaign-level first, then project-level
-        run_data = None
-        if campaign_slug:
-            run_data = workspace.load(project, f"campaigns/{campaign_slug}/runs/{run_id}.json")
-        if not run_data:
-            run_data = workspace.load(project, f"runs/{run_id}.json")
-        if run_data and isinstance(run_data.get("companies"), dict):
+    for run_id in sorted(run_ids):
+        # Load from BOTH paths and merge companies
+        for path in [f"campaigns/{campaign_slug}/runs/{run_id}.json", f"runs/{run_id}.json"] if campaign_slug else [f"runs/{run_id}.json"]:
+            run_data = workspace.load(project, path)
+            if not run_data or not isinstance(run_data.get("companies"), dict):
+                continue
             for domain, comp in run_data["companies"].items():
-                cls = comp.get("classification", {})
-                apollo = comp.get("apollo_data", {})
+                cls = (comp.get("classification") or {}) if isinstance(comp.get("classification"), dict) else {}
+                apollo = (comp.get("apollo_data") or {}) if isinstance(comp.get("apollo_data"), dict) else {}
+                existing = company_data.get(domain, {})
+                # Merge: prefer non-empty values from either source
                 company_data[domain] = {
-                    "name": comp.get("name", ""),
-                    "confidence": cls.get("confidence", ""),
-                    "reasoning": cls.get("reasoning", ""),
-                    "industry": apollo.get("industry", ""),
-                    "employee_count": apollo.get("employee_count", ""),
-                    "employee_range": apollo.get("employee_range", ""),
-                    "country": apollo.get("country", ""),
-                    "city": apollo.get("city", ""),
-                    "state": apollo.get("state", ""),
-                    "revenue": apollo.get("revenue", ""),
-                    "short_description": apollo.get("short_description", ""),
-                    "funding_stage": apollo.get("funding_stage", ""),
-                    "founded_year": apollo.get("founded_year", ""),
-                    "keywords": ", ".join(apollo.get("keywords", [])[:5]) if apollo.get("keywords") else "",
-                    "phone": apollo.get("phone", ""),
+                    "name": comp.get("name") or existing.get("name") or "",
+                    "confidence": cls.get("confidence") or existing.get("confidence") or "",
+                    "reasoning": cls.get("reasoning") or existing.get("reasoning") or "",
+                    "industry": apollo.get("industry") or existing.get("industry") or "",
+                    "employee_count": apollo.get("employee_count") or existing.get("employee_count") or "",
+                    "employee_range": apollo.get("employee_range") or existing.get("employee_range") or "",
+                    "country": apollo.get("country") or existing.get("country") or "",
+                    "city": apollo.get("city") or existing.get("city") or "",
+                    "state": apollo.get("state") or existing.get("state") or "",
+                    "revenue": apollo.get("revenue") or existing.get("revenue") or "",
+                    "short_description": apollo.get("short_description") or existing.get("short_description") or "",
+                    "funding_stage": apollo.get("funding_stage") or existing.get("funding_stage") or "",
+                    "founded_year": apollo.get("founded_year") or existing.get("founded_year") or "",
+                    "keywords": ", ".join(apollo.get("keywords", [])[:5]) if apollo.get("keywords") else existing.get("keywords", ""),
+                    "phone": apollo.get("phone") or existing.get("phone") or "",
                 }
 
     # Create sheet if none provided — auto-share with user_email from config
