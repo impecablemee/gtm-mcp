@@ -1,4 +1,4 @@
-"""GTM-MCP Server — 49 thin tools, zero LLM calls. stdio transport via FastMCP."""
+"""GTM-MCP Server — 49 tools. stdio transport via FastMCP."""
 import logging
 import sys
 from pathlib import Path
@@ -566,17 +566,19 @@ async def pipeline_people_to_push(
     existing_campaign_id: int | None = None,
     include_domains: list[str] | None = None,
     exclude_emails: list[str] | None = None,
+    person_ids: list[str] | None = None,
 ) -> dict:
     """Atomic post-classification → SmartLead. ONE call, ZERO LLM.
 
     After classification (targets in run file), does EVERYTHING deterministically:
-    1. Load targets from run file (or use include_domains for Phase 0 reuse)
-    2. Search people (FREE) + enrich (1 credit/person)
-    3. Save contacts + update totals (credits computed from run file, not passed)
-    4. Export to Google Sheet
-    5. Push to SmartLead (create or append)
+    1. Enrich pre-ranked people (person_ids REQUIRED — agent ranks first)
+    2. Save contacts + update totals (credits computed from run file)
+    3. Export to Google Sheet
+    4. Push to SmartLead (create or append)
+    5. Save ranked_unenriched.json for future "add more" runs
     6. Update all tracking files
 
+    person_ids: REQUIRED — agent-ranked Apollo person IDs from search+rank phase.
     mode: "create" for new campaign, "append" for existing (pass existing_campaign_id).
     include_domains: Phase 0 — use these domains instead of reading from classification.
     exclude_emails: Mode 3 — skip emails already in campaign.
@@ -587,6 +589,7 @@ async def pipeline_people_to_push(
         sequence_steps, test_email, max_people_per_company=max_people_per_company,
         create_sheet=create_sheet, mode=mode, existing_campaign_id=existing_campaign_id,
         include_domains=include_domains, exclude_emails=exclude_emails,
+        person_ids=person_ids,
         config=_config, workspace=_workspace,
     )
 
