@@ -185,7 +185,7 @@ Examples:
 ```
 1. Email accounts: look for "accounts with X", "use X accounts", sender name, domain hint
    → If found: smartlead_list_accounts() + smartlead_search_accounts(hint, project=project_slug, campaign_slug=active_campaign_slug)
-   → If NOT found: ASK "Which email accounts should I use? (e.g. 'accounts with Rinat')"
+   → If NOT found: ASK "Which email accounts should I use? (e.g. 'accounts with Sally', or a sender name/domain)"
    **ALWAYS pass project + campaign_slug** so accounts save directly to campaigns/{slug}/.
    
    **After selecting accounts, ALWAYS tell the user:**
