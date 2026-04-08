@@ -1392,23 +1392,33 @@ async def pipeline_people_to_push(
                 "targets_searched": len(target_domains)}
 
     # 3. Enrich ONLY enough for KPI — save the rest for future runs.
-    # Enrichment yield ~70-80% (not all IDs produce verified emails).
-    # Load KPI from run file to know how many contacts we need.
+    # Enrichment yield ~70% (not all IDs produce verified emails).
     kpi_target = run_data.get("kpi", {}).get("target_people", 100)
-    # Existing contacts (Mode 3 append may already have some)
     existing_contact_count = len(
         (workspace.load(project, _campaign_path("contacts.json", campaign_slug)) or [])
     )
     needed = max(0, kpi_target - existing_contact_count)
-    # Buffer for yield loss: enrich ~40% more IDs than needed contacts
-    enrich_count = min(len(all_person_ids), max(needed, 10) + int(needed * 0.4))
+    # Enrich ceil(needed / 0.7) to account for yield loss. Never more than needed * 1.5.
+    # If needed=0 (KPI already met), enrich 0 — save everything for future.
+    if needed == 0:
+        enrich_count = 0
+    else:
+        import math
+        enrich_count = min(len(all_person_ids), math.ceil(needed / 0.7))
     ids_to_enrich = all_person_ids[:enrich_count]
     ids_to_save = all_person_ids[enrich_count:]
 
+    # Always save unenriched IDs (even if empty — clears previous file)
+    workspace.save(project, _campaign_path("ranked_unenriched.json", campaign_slug), ids_to_save)
     if ids_to_save:
-        # Save unenriched ranked IDs for future "add more" runs — zero search/rank cost next time
-        workspace.save(project, _campaign_path("ranked_unenriched.json", campaign_slug), ids_to_save)
-        logger.info("Saved %d ranked-but-unenriched IDs for future runs (KPI-limited enrichment)", len(ids_to_save))
+        logger.info("Saved %d ranked-but-unenriched IDs for future runs", len(ids_to_save))
+
+    if not ids_to_enrich:
+        return {"success": True, "data": {
+            "contacts_saved": 0, "kpi_met": True,
+            "ranked_unenriched": len(ids_to_save),
+            "message": f"KPI already met ({existing_contact_count} existing). Saved {len(ids_to_save)} ranked IDs for future runs.",
+        }}
 
     logger.info("Enriching %d of %d ranked IDs (need %d contacts, %d existing, %d saved for later)",
                 len(ids_to_enrich), len(all_person_ids), needed, existing_contact_count, len(ids_to_save))
