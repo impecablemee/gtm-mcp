@@ -165,17 +165,17 @@ Project name: just the company/brand — "Sally", "Inxy", "EasyStaff"
   → NOT "Sally Fintech" (fintech is a segment, not the company)
   → create_project(name="Sally")  → project_slug = "sally"
 
-Campaign slug: {project_slug}-{segment_lower}-{MMDD}
-  → "sally-fintech-0408", "sally-saas-0415", "inxy-affiliate-0407"
+Campaign slug: derived from campaign name via re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+  Campaign name format: "{Project} {SEGMENT} DD/MM"
+  → "Sally FINTECH 08/04" → slug "sally-fintech-08-04"
 ```
 
 Examples:
-| Offer company | Segment | Project | Campaign slug |
-|---------------|---------|---------|---------------|
-| Sally | fintech | sally | sally-fintech-0408 |
-| Sally | SaaS | sally | sally-saas-0415 |
-| Inxy | affiliate networks | inxy | inxy-affiliate-0407 |
-| EasyStaff | EU staffing | easystaff | easystaff-eu-staffing-0410 |
+| Offer company | Segment | Campaign name | Campaign slug |
+|---------------|---------|---------------|---------------|
+| Sally | fintech | Sally FINTECH 08/04 | sally-fintech-08-04 |
+| Sally | SaaS | Sally SAAS 15/04 | sally-saas-15-04 |
+| Inxy | affiliate | Inxy AFFILIATE 07/04 | inxy-affiliate-07-04 |
 
 ## Mandatory Questions — RESOLVE IMMEDIATELY
 
@@ -240,7 +240,7 @@ save_data(project, "state.yaml", {
   mode: "fresh",                          # or "new_campaign" or "append"
   status: "running",
   current_phase: "offer_extraction",
-  active_campaign_slug: "{project_slug}-{primary_segment_lower}-{MMDD}",  # set IMMEDIATELY — all data goes here
+  active_campaign_slug: null,             # set when campaign name is determined (after mandatory questions)
   active_campaign_id: null,               # set in Step 7 (SmartLead ID)
   active_run_id: "run-001",
   phase_states: {
@@ -1162,33 +1162,15 @@ result = campaign_push(
 
 This replaces 4+ separate tool calls. Zero LLM needed. ~10 seconds total.
 
-### Mode 3 (append): Add leads to EXISTING campaign — NOT campaign_push
+### Mode 3 (append): ALWAYS use pipeline_people_to_push(mode="append")
 
-**Mode 3 does NOT create a new campaign.** The campaign already exists in SmartLead.
+**Mode 3 does NOT create a new campaign.** But it MUST use `pipeline_people_to_push` — the same
+tool as Mode 1. The tool handles append internally: dedup against SmartLead, push leads,
+update campaign.yaml + run file + contacts.json — ALL in one atomic call.
 
-```
-# Save leads file
-save_data(project, "leads_for_push.json", all_leads_array)
-
-# Add leads to existing campaign (chunks of 100 internally)
-smartlead_add_leads(campaign_id=existing_campaign_id, leads=all_leads_array)
-
-# MANDATORY: Update local campaign.yaml with new totals
-campaign_yaml = load_data(project, f"campaigns/{slug}/campaign.yaml")
-save_data(project, f"campaigns/{slug}/campaign.yaml", {
-  total_leads_pushed: campaign_yaml.total_leads_pushed + len(all_leads_array),
-  run_ids: [...campaign_yaml.run_ids, run_id]
-}, mode="merge")
-
-# Update run file
-save_data(project, f"runs/{run_id}.json", {
-  campaign_id: existing_campaign_id,
-  campaign_slug: slug,
-  campaign: {campaign_id: existing_campaign_id, leads_pushed: len(all_leads_array), pushed_at: "{now}"}
-}, mode="merge")
-```
-
-**WARNING:** Past runs showed leads uploaded to SmartLead successfully but campaign.yaml not updated (stale lead count and empty run_ids=[]).
+**NEVER call smartlead_add_leads directly for Mode 3.** The tool does it inside
+pipeline_people_to_push(mode="append"). Calling it directly bypasses contacts.json save,
+run file update, and campaign.yaml update — leaving local state broken.
 
 ### Update tracking — ALL THREE files must be updated
 
