@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "gtm": {
-      "command": "python3",
-      "args": ["start-mcp.py"],
+      "command": "uv",
+      "args": ["run", "--frozen", "gtm-mcp"],
       "autoApprove": [
         "get_config",
         "set_config",
