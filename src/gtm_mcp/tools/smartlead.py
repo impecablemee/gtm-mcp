@@ -305,7 +305,7 @@ async def smartlead_list_accounts(*, config=None, workspace=None) -> dict:
         "top_domains": dict(sorted(domains.items(), key=lambda x: -x[1])[:20]),
         "cached_at": datetime.now(tz.utc).isoformat(),
         "cache_path": str(cache_path),
-    }}
+    }, "message": f"{len(accounts)} email accounts loaded across {len(domains)} domains → {cache_path}"}
 
 
 # ---------------------------------------------------------------------------
