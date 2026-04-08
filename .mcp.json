@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "gtm": {
-      "command": "bash",
-      "args": ["start-mcp.sh"],
+      "command": "python3",
+      "args": ["start-mcp.py"],
       "autoApprove": [
         "get_config",
         "set_config",
