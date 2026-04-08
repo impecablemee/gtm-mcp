@@ -155,6 +155,28 @@ Free text:
 
 **Key: the agent must recognize "add more to this campaign" even without explicit `campaign=` parameter.** If the user references a SmartLead campaign URL and says "add more" / "gather more" / "append" → it's Mode 3.
 
+## Entity Naming — Project vs Campaign
+
+**Project = the OFFER/COMPANY** (who is selling). One project can have many campaigns.
+**Campaign = the SEGMENT being targeted** (who we're reaching out to).
+
+```
+Project name: just the company/brand — "Sally", "Inxy", "EasyStaff"
+  → NOT "Sally Fintech" (fintech is a segment, not the company)
+  → create_project(name="Sally")  → project_slug = "sally"
+
+Campaign slug: {project_slug}-{segment_lower}-{MMDD}
+  → "sally-fintech-0408", "sally-saas-0415", "inxy-affiliate-0407"
+```
+
+Examples:
+| Offer company | Segment | Project | Campaign slug |
+|---------------|---------|---------|---------------|
+| Sally | fintech | sally | sally-fintech-0408 |
+| Sally | SaaS | sally | sally-saas-0415 |
+| Inxy | affiliate networks | inxy | inxy-affiliate-0407 |
+| EasyStaff | EU staffing | easystaff | easystaff-eu-staffing-0410 |
+
 ## Mandatory Questions — RESOLVE IMMEDIATELY
 
 **These are REQUIRED for the pipeline. Check the user's input FIRST — the document or /launch args may already contain the answers. Only ask if missing.**
