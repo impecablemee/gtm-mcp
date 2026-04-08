@@ -259,8 +259,7 @@ Claude Code ──stdio──> gtm-mcp server (49 tools, 0 LLM calls)
 
 Zero LLM calls inside the server. Claude Code does all the reasoning using domain knowledge encoded as skills.
 
-**Tools** (`src/gtm_mcp/`): Thin API wrappers. Only data access.
-
+**Tools** (`src/gtm_mcp/`): Thin API wrappers. Only data access
 **Skills** (`.claude/skills/`): Domain knowledge in markdown — classification rules, email writing rules, filter strategies. Claude reads these and reasons.
 
 **Commands** (`.claude/commands/`): The `/launch` command — orchestrates the full pipeline.
