@@ -850,33 +850,64 @@ This guarantees ALL classified companies survive. Zero data loss.
 
 Record: `round.timestamps.classify_completed = "{now}"`
 
-### Phase C+D+E: PEOPLE → CONTACTS → SHEET → CAMPAIGN — ONE atomic tool
+### Phase C: SEARCH all candidates — DETERMINISTIC (FREE)
 
-**After classification, ONE tool call does EVERYTHING. Zero agent decisions.**
+```
+candidates = apollo_search_people_batch(
+  api_key, target_domains, per_page=25,
+  person_seniorities=["c_suite", "vp", "head", "director", "manager"]
+)
+# ONE tool call → all candidates for ALL target companies. 20 concurrent. ~10s. ZERO credits.
+# Returns: {results: [{domain, people: [{id, title, seniority, name, ...}]}, ...]}
+```
+
+### Phase D: RANK candidates by role — LLM (subagents)
+
+Same pattern as classification. The volume from Phase C determines subagent count.
+
+```
+# Split candidates into chunks of ~30-50 companies
+chunks = split_by_companies(candidates.results, chunk_size=40)
+# Spawn subagents — each gets: chunk + target_roles from project.yaml
+# Each subagent picks top 3 people per company whose titles best match target_roles
+# "Chief Commercial Officer" → matches sales. "Head of Engineering" → skip.
+# Subagents write selected person_ids to temp files.
+
+# Merge all chunks → flat list of person_ids
+selected_person_ids = merge_all_chunks()
+```
+
+Dynamic subagent count: ≤40 companies → inline (no subagent). 40-100 → 2. 100-200 → 3-4.
+
+### Phase E: ENRICH + SAVE + PUSH — DETERMINISTIC
 
 ```
 result = pipeline_people_to_push(
   project=project_slug,
   run_id=run_id,
-  campaign_name="{project_name} {segment_name} {DD/MM}",  # e.g. "Acme SaaS PAYMENTS 07/04"
+  campaign_name="{project_name} {VERTICAL} {DD/MM}",
   sending_account_ids=selected_account_ids,
   country=country_code,
   segment=segment_name,
-  sequence_steps=sequence_steps,        # from Step 6 or from document
+  sequence_steps=sequence_steps,
   test_email=user_email,
   max_people_per_company=3,
   create_sheet=true,
   mode="create",                        # or "append" for Mode 3
   existing_campaign_id=campaign_id,     # only for Mode 3
+  person_ids=selected_person_ids,       # from Phase D — agent-ranked, only best role matches
 )
 → Returns: {targets, contacts, people_credits, total_credits, kpi_met,
             campaign_id, leads_uploaded, sheet_url}
 ```
 
+**With person_ids**: tool skips search, enriches ONLY selected people. Saves credits, gets right roles.
+**Without person_ids** (fallback): tool searches + takes top N blindly (legacy, worse role targeting).
+
 **What happens INSIDE this one call:**
 1. Load target domains from run file (from classification)
-2. `apollo_search_people_batch` — all targets in parallel (FREE)
-3. `apollo_enrich_people` — bulk enrich (1 credit per verified email)
+2. Skip search — use pre-selected person_ids from Phase D
+3. `apollo_enrich_people` — bulk enrich ONLY selected people (1 credit per verified email)
 4. Save contacts to contacts.json + run file + update totals + set kpi_met + mark people_extracted
 5. Export to Google Sheet (auto-share with user_email)
 6. Save leads_for_push.json

@@ -1303,27 +1303,34 @@ async def pipeline_people_to_push(
     existing_campaign_id: int | None = None,
     include_domains: list[str] | None = None,
     exclude_emails: list[str] | None = None,
+    person_ids: list[str] | None = None,
     *,
     config=None,
     workspace=None,
 ) -> dict:
     """Atomic post-classification → SmartLead ready. ONE call, ZERO LLM.
 
-    After classification is done (targets in run file), this tool does EVERYTHING:
-    1. Load target domains from run file (or use include_domains for Phase 0)
-    2. apollo_search_people_batch — search all targets (FREE)
-    3. apollo_enrich_people — bulk enrich (1 credit per verified email)
-    4. Save contacts to contacts.json + run file + update totals
-    5. Export to Google Sheet (optional)
-    6. Push to SmartLead — create campaign OR append to existing
-    7. Update campaign.yaml + run file with campaign data
+    Two modes of operation:
+
+    A) WITHOUT person_ids (legacy/simple): tool searches + takes top N blindly + enriches.
+    B) WITH person_ids (recommended): agent already searched + ranked candidates,
+       tool enriches ONLY the provided IDs + saves + pushes. No search inside.
+
+    Recommended flow (agent controls role prioritization):
+      1. Agent calls apollo_search_people_batch(domains, per_page=25) — FREE
+      2. Agent reads target_roles from project.yaml
+      3. Agent ranks candidates by title relevance (LLM reasoning)
+      4. Agent picks top 3 per company → collects person_ids
+      5. Agent calls pipeline_people_to_push(person_ids=[...]) — enrich + save + push
+
+    Steps 3-4 are where LLM adds value (understanding "Chief Commercial Officer" = sales leader).
+    Step 5 is fully deterministic.
 
     mode: "create" → new campaign via campaign_push
           "append" → add leads to existing_campaign_id via smartlead_add_leads
     include_domains: Phase 0 — override target lookup with specific domains (unused targets)
     exclude_emails: Mode 3 — skip emails already in campaign
-
-    Replaces 6+ separate tool calls. Eliminates all agent decisions post-classification.
+    person_ids: pre-selected Apollo person IDs (skip search, go straight to enrich)
     """
     config = config or _default_config()
     workspace = workspace or _default_workspace()
@@ -1352,32 +1359,38 @@ async def pipeline_people_to_push(
 
     logger.info("pipeline_people_to_push: %d targets from %d companies", len(target_domains), len(companies))
 
-    # 2. Search people (FREE — no credits)
+    # 2. Get person IDs — either pre-selected by agent (recommended) or blind search
     from gtm_mcp.tools.apollo import apollo_search_people_batch, apollo_enrich_people
 
     api_key = config.get("apollo_api_key")
     if not api_key:
         return {"success": False, "error": "apollo_api_key not configured"}
 
-    seniorities = person_seniorities or ["c_suite", "vp", "head", "director", "manager"]
-    search_result = await apollo_search_people_batch(
-        api_key, target_domains, person_seniorities=seniorities, per_page=10,
-    )
-    if not search_result.get("success"):
-        return {"success": False, "error": f"People search failed: {search_result.get('error')}", "step": "search"}
+    if person_ids:
+        # Agent already searched + ranked candidates. Use their selection.
+        all_person_ids = person_ids
+        logger.info("Using %d pre-selected person IDs (agent-ranked)", len(all_person_ids))
+    else:
+        # Fallback: blind search + top N (no role prioritization)
+        seniorities = person_seniorities or ["c_suite", "vp", "head", "director", "manager"]
+        search_result = await apollo_search_people_batch(
+            api_key, target_domains, person_seniorities=seniorities, per_page=25,
+        )
+        if not search_result.get("success"):
+            return {"success": False, "error": f"People search failed: {search_result.get('error')}", "step": "search"}
 
-    # 3. Collect top N person IDs per company, then enrich
-    all_person_ids = []
-    search_data = search_result.get("data", search_result)  # handle both {data:{results:[]}} and {results:[]}
-    for entry in search_data.get("results", []):
-        people = entry.get("people", [])
-        top_n = [p.get("id") for p in people[:max_people_per_company] if p.get("id")]
-        all_person_ids.extend(top_n)
+        all_person_ids = []
+        search_data = search_result.get("data", search_result)
+        for entry in search_data.get("results", []):
+            people = entry.get("people", [])
+            top_n = [p.get("id") for p in people[:max_people_per_company] if p.get("id")]
+            all_person_ids.extend(top_n)
 
     if not all_person_ids:
         return {"success": False, "error": "No people found across target companies", "step": "search",
                 "targets_searched": len(target_domains)}
 
+    # 3. Enrich selected people (1 credit per verified email)
     enrich_result = await apollo_enrich_people(api_key, all_person_ids)
     if not enrich_result.get("success"):
         return {"success": False, "error": f"Enrichment failed: {enrich_result.get('error')}", "step": "enrich"}
