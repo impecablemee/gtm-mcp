@@ -276,36 +276,56 @@ async def smartlead_list_accounts(*, config=None, workspace=None) -> dict:
             break  # last page
         offset += 100
 
-    accounts = [{
-        "id": a.get("id"),
-        "from_email": a.get("from_email", ""),
-        "from_name": a.get("from_name", ""),
-        "warmup_status": a.get("warmup_status", ""),
-    } for a in all_accounts]
+    accounts = []
+    disconnected = []
+    for a in all_accounts:
+        smtp_ok = a.get("is_smtp_success", True)
+        imap_ok = a.get("is_imap_success", True)
+        warmup = a.get("warmup_details", {}) or {}
+        entry = {
+            "id": a.get("id"),
+            "from_email": a.get("from_email", ""),
+            "from_name": a.get("from_name", ""),
+            "connected": bool(smtp_ok and imap_ok),
+            "warmup_status": warmup.get("status", a.get("warmup_status", "")),
+        }
+        if not entry["connected"]:
+            disconnected.append(entry["from_email"])
+        accounts.append(entry)
 
-    # Cache full list locally
+    connected_accounts = [a for a in accounts if a["connected"]]
+
+    # Cache full list locally (only connected accounts usable for campaigns)
     import json
     cache_path = workspace.base / _ACCOUNTS_CACHE_FILE
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps({
         "cached_at": datetime.now(tz.utc).isoformat(),
-        "accounts": accounts,
+        "accounts": connected_accounts,
     }, indent=2, ensure_ascii=False))
 
     # Return summary only (not 2000+ accounts)
     domains: dict[str, int] = {}
-    for a in accounts:
+    for a in connected_accounts:
         email = a.get("from_email", "")
         domain = email.split("@")[1] if "@" in email else "unknown"
         domains[domain] = domains.get(domain, 0) + 1
 
-    return {"success": True, "data": {
+    summary = {
         "total": len(accounts),
+        "connected": len(connected_accounts),
+        "disconnected": len(disconnected),
         "unique_domains": len(domains),
         "top_domains": dict(sorted(domains.items(), key=lambda x: -x[1])[:20]),
         "cached_at": datetime.now(tz.utc).isoformat(),
         "cache_path": str(cache_path),
-    }, "message": f"{len(accounts)} email accounts loaded across {len(domains)} domains → {cache_path}"}
+    }
+    if disconnected:
+        summary["disconnected_emails"] = disconnected[:20]  # show first 20
+
+    return {"success": True, "data": summary,
+            "message": f"{len(connected_accounts)} connected accounts across {len(domains)} domains"
+                       f" ({len(disconnected)} disconnected skipped) → {cache_path}"}
 
 
 # ---------------------------------------------------------------------------
