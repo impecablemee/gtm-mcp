@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "gtm": {
-      "command": "uv",
-      "args": ["run", "gtm-mcp"],
+      "command": "bash",
+      "args": ["start-mcp.sh"],
       "autoApprove": [
         "get_config",
         "set_config",
