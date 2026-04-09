@@ -665,15 +665,15 @@ async def smartlead_list_accounts() -> dict:
 
 
 @mcp.tool()
-async def smartlead_search_accounts(query: str, project: str = "") -> dict:
+async def smartlead_search_accounts(query: str, project: str = "", campaign_slug: str = "") -> dict:
     """Search cached email accounts by name, email, or domain.
 
     Call smartlead_list_accounts() first to populate the cache.
-    If project provided, saves selected accounts to project dir.
+    Pass project + campaign_slug to save directly to campaigns/{slug}/.
     Returns matching accounts with IDs ready for campaign creation.
     """
     from gtm_mcp.tools.smartlead import smartlead_search_accounts as _impl
-    return await _impl(query, project=project, config=_config, workspace=_workspace)
+    return await _impl(query, project=project, campaign_slug=campaign_slug, config=_config, workspace=_workspace)
 
 
 @mcp.tool()
