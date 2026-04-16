@@ -1,255 +1,139 @@
-# GTM-MCP — B2B Cold Outreach for AI Agents
+# GTM-MCP — B2B Cold Outreach Toolkit for Claude Code
 
-An open-source MCP server that turns Claude Code into a full B2B cold outreach pipeline. Tell it what you sell and who you're targeting — it finds companies, verifies they're a fit, extracts contacts, writes email sequences, and creates ready-to-send campaigns.
+A set of skills and API wrappers that turn Claude Code into a full B2B cold email pipeline. Describe what you sell and who you're targeting — it finds companies, verifies fit, extracts contacts, writes sequences, and launches campaigns. All from your terminal, all on your machine.
 
-## What is Cold Outreach?
+Built by [GetSally](https://getsally.io), a B2B lead gen agency. The classification rules, filtering logic, and email patterns in this toolkit come from running thousands of outreach campaigns for 100+ B2B companies across the US, EU, and other markets – from early-stage startups to large enterprises. Our campaigns deliver 10–50 qualified leads per month. Used daily by our 20-person sales team. Now open source.
 
-You have a product. There are companies out there that need it but don't know you exist. Cold outreach is how you reach them — you send a message to someone who's never heard of you, explaining how you can help.
-
-Outreach channels include email, LinkedIn, WhatsApp, Telegram, and cold calls. **This MCP focuses on email** (LinkedIn via [GetSales](https://getsales.io) is also supported).
-
-### The Math
-
-Cold outreach works on volume. Even with perfect targeting and great emails, expect roughly **1 positive reply per 100 people you contact**. That's normal — most people ignore cold emails. But if you contact 1,000 relevant people, that's ~10 interested leads. At 5,000 that's ~50.
-
-So you need thousands of **verified, relevant** contacts. You can't do this manually — you need a pipeline.
-
-### The Pipeline: How Email Outreach Works
-
-Here's the full journey from "I have a product" to "replies in my inbox":
-
-**1. Find companies (data provider)**
-
-You need a database of millions of companies to search through. [Apollo](https://apollo.io) is one such provider — you search by industry, location, company size, keywords, and it returns thousands of results.
-
-The problem: Apollo's filters are broad. Searching "fintech companies in US" returns thousands of results, but maybe only 30-40% actually need what you sell. Apollo gives you the raw material, not the finished list.
-
-**2. Verify they're actually your target (scraping + AI)**
-
-This is where most outreach fails — people skip this step and blast emails to everyone Apollo returns. The result: low reply rates and your domain gets flagged as spam.
-
-Instead, this pipeline scrapes each company's website and has your AI agent read it: "Based on what this company does, would they actually need our product?" This filters out 60-70% of Apollo results, leaving only real targets.
-
-For website scraping, we use [Apify](https://apify.com) — specifically its residential proxies, which make requests look like regular browser traffic so websites don't block you.
-
-**3. Find the right people at each company**
-
-At each verified target company, you need the right person's email — typically a decision-maker (CEO, VP Sales, Head of Partnerships, etc.). Apollo provides this too: first a FREE people search to find names, then 1 credit per person for a verified email address.
-
-**4. Write email sequences**
-
-You don't send one email — you send a sequence: an initial email, then 2-3 follow-ups spaced days apart. Each email should be short, plain text (no HTML, no images, no tracking links — these trigger spam filters), and focused on the value you provide.
-
-The best emails reference real case studies: "We helped [similar company] achieve [specific result]" converts much better than generic pitches.
-
-**5. Send via an email sequencer**
-
-You can't send cold emails from Gmail — Google will shut you down. Instead, you use a sequencer like [SmartLead](https://smartlead.ai) that handles:
-- Sending from multiple domains/inboxes to stay under spam thresholds
-- Scheduling follow-ups automatically
-- Tracking who replied, who opened, who bounced
-- Warming up new email accounts (see below)
-
-**6. Monitor replies and follow up**
-
-When people reply, you triage: interested (hand to sales), not interested (stop emailing), out of office (wait and retry). This MCP also automates reply classification.
-
-### Email Infrastructure You Need (~2 Weeks Setup, Rotate Every 4-6 Weeks)
-
-Before sending cold emails, you need sending infrastructure. Initial setup takes ~2 weeks. Domains degrade over time as recipients mark emails as spam, so you'll need to rotate — buy new domains, warm them up, and retire old ones. Typical cycle: every 4-6 weeks, based on deliverability tests.
-
-**Why not use your regular email?** Google/Microsoft will flag your domain as spam if you send bulk cold emails. You'll stop receiving normal business emails. Never send cold outreach from your primary domain.
-
-**What to do instead:**
-
-1. **Buy 5+ domains** on [Namecheap](https://namecheap.com) — variations of your main domain. If you're `acme.com`, buy `acme-team.com`, `getacme.com`, `tryacme.com`, etc. (~$10/domain/year)
-
-2. **Create 2 email inboxes per domain** via [Google Workspace](https://workspace.google.com) — e.g., `john@acme-team.com` and `sarah@acme-team.com`. That gives you 10 inboxes across 5 domains.
-
-3. **Connect all inboxes to [SmartLead](https://smartlead.ai)** and start warmup. Warmup means SmartLead automatically sends and receives friendly emails between your new inboxes and other users' inboxes — this builds reputation with Google so your emails don't land in spam.
-
-4. **Wait ~2 weeks** for warmup to complete. After that, you're ready to send.
-
-**Capacity:** Each domain safely sends ~100 emails/day (split across its 2 inboxes). With 5 domains, that's ~500 emails/day — enough for most campaigns.
+For updates, follow [Rinat Khatipov on LinkedIn](https://www.linkedin.com/in/rinat-khatipov/).
 
 ---
 
-**This MCP automates steps 1-6 above.** You tell it what you sell, it does the rest. Here's how:
+## Requirements & flexibility
 
-## Real-World Examples
+The full `/launch` pipeline runs on three tools: [Apollo](https://apollo.io) for company and people data, [SmartLead](https://smartlead.ai) for email campaigns, and [Apify](https://apify.com) for web scraping. If you already use Apollo + SmartLead, you can plug in your API keys and run the whole pipeline end-to-end.
 
-### Step 1: Generate an outreach strategy
+**Don't use these tools?** You can still grab individual skills and use them in your own setup — the AI classification skill, the ICP filtering logic, the email sequence patterns. They're just markdown files in `.claude/skills/`, portable to any Claude Code project.
 
-You don't need to write strategy documents yourself. Open Claude Code in the gtm-mcp directory and ask:
+We're actively working on more integrations (Instantly, Lemlist, ZoomInfo, Hunter, and others) to give you more flexibility on the stack. If your setup needs something we don't cover yet — [open an issue](https://github.com/impecablemee/gtm-mcp/issues) or drop a comment. Feedback shapes what we build next.
+
+---
+
+## Getting Started
+
+Open your terminal and copy-paste each block below, one at a time. That's the entire install.
+
+<sub>On Mac: press `Cmd + Space`, type "Terminal", hit Enter. On Windows: open "Windows Terminal" or "PowerShell".</sub>
+
+### Step 1 — Clone the repo
+
+```bash
+git clone https://github.com/impecablemee/gtm-mcp.git
+cd gtm-mcp
+```
+
+### Step 2 — Add your API keys
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` in any text editor and fill in:
+
+| Key | Where to get it | Required? |
+|-----|----------------|-----------|
+| `GTM_MCP_APOLLO_API_KEY` | [Apollo](https://apollo.io) → Settings → API Keys | Yes |
+| `GTM_MCP_SMARTLEAD_API_KEY` | [SmartLead](https://smartlead.ai) → Settings → API | Yes |
+| `GTM_MCP_USER_EMAIL` | Your email — test emails land here before activation | Yes |
+| `GTM_MCP_APIFY_PROXY_PASSWORD` | [Apify](https://apify.com) → Proxy → Password | Optional, improves scraping |
+| `GTM_MCP_GETSALES_API_KEY` | [GetSales](https://getsales.io) → Settings | Optional, for LinkedIn outreach |
+| `GTM_MCP_GETSALES_TEAM_ID` | GetSales → Team settings | Optional, for LinkedIn outreach |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Google Cloud Console | Optional, for Sheets export |
+| `GOOGLE_SHARED_DRIVE_ID` | Google Drive | Optional, for Sheets export |
+
+Save and close the file.
+
+### Step 3 — Open in Claude Code
+
+```bash
+claude
+```
+
+This opens Claude Code inside the `gtm-mcp` directory. It automatically discovers `.mcp.json` and loads all tools. No `pip install`, no virtualenv — `uv run` handles everything.
+
+> If `claude` is not recognized, install Claude Code first: https://docs.anthropic.com/en/docs/claude-code/overview
+
+---
+
+## How to Use
+
+### Step 1: Create an outreach strategy
+
+Before launching a campaign, you need a strategy — an md file describing what you sell, who you're targeting, which segments, and what case studies you have. Two ways to create one:
+
+**Option A — Let Claude generate it for you.**
+
+Inside Claude Code in the gtm-mcp directory:
 
 ```
-Generate an outreach strategy for getsally.io.
+Generate an outreach strategy for [yourwebsite.com].
 Use all case studies from the website — focus on segments
-where they have proven results and success stories.
+where we have proven results and success stories.
 ```
 
-**What Claude does:**
-1. Scrapes getsally.io — reads the product page, pricing, case studies
-2. Identifies segments with real success stories (e.g., "fintech companies reduced payment integration time by 60%")
-3. For each segment, generates: target Apollo keywords, industry filters, and a tailored email sequence that references those case studies
-4. Saves everything as `outreach-plan-fintech.md`
+You can also feed Claude additional materials: pitch decks, product descriptions, offers. More context = more accurate strategy.
 
-**Why focus on case studies?** When your cold email says "we helped [Company X] achieve [specific result]", that's proof — not a pitch. Outreaching segments where you have real success stories means your emails carry evidence. Much higher reply rates than generic "we do X, want a demo?" emails.
+Claude scrapes your website, studies case studies and product pages, and generates a structured md file with segments, Apollo keywords, and draft email sequences. Saves as `outreach-plan-[segment].md`.
 
-You review the document, adjust if needed, then move to Step 2.
+Review the document, adjust if needed, then move to Step 2.
+
+**Option B — Create the strategy file manually.**
+
+If you already know your ICP and want full control, create an md file yourself and place it in the project directory.
+
+---
 
 ### Step 2: Launch the campaign
 
-Feed the strategy to the pipeline:
+When your strategy is ready, launch the campaign. Type `/launch`, provide your website and describe your ICP in detail. **The more detailed the ICP description, the better** — it directly determines filtering quality and how many target companies end up in the campaign.
+
+**From a strategy file:**
 
 ```
 /launch outreach-plan-fintech.md
 ```
 
-Or skip the document and launch from a URL + description:
+**Or directly from a URL + ICP description:**
 
 ```
-/launch https://getsally.io fintech payments in US
+/launch https://yourcompany.com fintech payments companies in US, 50-500 employees, Series A+
 ```
 
-**What happens — every step explained:**
+**What happens after `/launch`:**
 
-1. **Offer extraction** — Claude reads your strategy document (or scrapes the website if you gave a URL). Extracts a structured profile: what you sell, who needs it, what problems you solve, what makes you different.
+1. **Offer extraction** — Claude reads your strategy (or scrapes the website) and builds a structured profile: what you sell, who needs it, what problems you solve.
+2. **Filter generation** — based on the offer, picks Apollo keywords and filters. Runs a probe search (6 credits) to estimate volume and cost.
+3. **⏸️ Strategy approval** — shows the full plan: keywords, geography, cost estimate, draft email sequence. **Nothing runs until you say "yes".** You can adjust: remove a keyword, add a geography, change email copy.
+4. **Search and classification** — searches Apollo for companies, scrapes each website, uses AI to determine: is this company actually your target? Filters out 60-70% of irrelevant results.
+5. **Contact extraction** — finds decision-makers at each verified company. Free people search first, then paid enrichment (1 Apollo credit per contact).
+6. **Campaign creation** — creates a SmartLead campaign in DRAFT mode (not sending!). Uploads contacts, sets up the sequence. Sends a test email to your inbox.
+7. **⏸️ Activation** — you check the test email. If it looks good, type `activate`. Only then does SmartLead start sending.
 
-2. **Filter generation** — based on your offer, Claude generates Apollo search keywords (e.g., "payment processing", "embedded finance", "BNPL platform") and industry filters. Then runs a small probe search (costs 6 Apollo credits) to check: how many companies exist for these keywords? What percentage are actually our targets? This estimates the total cost before committing.
-
-3. **Strategy approval** — Claude shows you the complete plan: all keywords it will search, industries, geography, estimated Apollo credits cost, and the draft email sequence. **You review and either approve or adjust** ("remove this keyword", "add Germany to geography", "make the first email shorter"). Nothing runs until you say yes.
-
-4. **Gather + classify** — the big step. Claude searches Apollo for companies using each keyword one at a time (one keyword per request finds 7x more unique companies than combining them). For each batch of results, it scrapes every company's website and reads it: "Based on what this company actually does, would they benefit from our fintech product?" Companies that don't fit are discarded. This typically filters out 60-70% of Apollo results.
-
-5. **People extraction** — at each verified target company, Claude finds decision-makers. First a FREE people search (no credits) to find names and titles, then a paid enrichment (1 Apollo credit per person) to get verified email addresses. Targets the right roles — CTO, VP Engineering, Head of Payments, not office managers.
-
-6. **Blacklist + email accounts** — before creating the campaign, Claude checks: have we emailed any of these companies before? If so, they're skipped (no duplicate outreach). Then it shows you which of your SmartLead email accounts will be used for sending — the ones matching your outreach domains. **You confirm the accounts look right.**
-
-7. **Campaign creation (DRAFT)** — creates the SmartLead campaign in DRAFT mode (not sending yet!). Uploads all contacts with personalization fields (first name, company name, etc.). Then **sends a test email to YOUR inbox** — the email you set in `GTM_MCP_USER_EMAIL` in `.env`. You see exactly what the recipient will see.
-
-8. **Activation** — you check the test email in your inbox. Does it look good? Is the personalization correct? If yes, type `activate`. Only then does SmartLead start sending emails according to the schedule.
-
-**Two moments where you decide:** strategy approval (step 3) and campaign activation (step 8). Everything between is autonomous.
-
-### After launch: keep scaling
-
-Once a campaign is running, you can add more contacts at any time:
-
-```
-gather 50 more
-```
-
-Claude finds 50 more target contacts (using the best-performing keywords from the previous run), checks they're not already in the campaign, and pushes only new ones. You preview and activate again.
-
-### Step 3: Add contacts to an existing campaign
-
-You don't need to start from scratch every time. Have a running campaign that's working well? Just add more contacts to it:
-
-```
-/launch campaign=3070919 kpi=+100
-```
-
-This reuses the same project, email accounts, and email sequence. Finds 100 MORE contacts. Deduplicates against everyone already in the campaign. Pushes only new, unique contacts.
-
-#### Real example — scaling an Inxy.io campaign with affiliate networks:
-
-This also works with campaigns you created manually in SmartLead (not through this MCP). Just paste the SmartLead campaign URL and describe what you want:
-
-```
-/launch add more contacts to this campaign
-https://app.smartlead.ai/app/email-campaign/3137079/analytics
-
-I want to add more Affiliate networks to the given campaign
-and offer them inxy.io
-
-Target CPA/CPL/RevShare networks that connect advertisers
-with affiliates. Companies like:
-- Adsterra (adsterra.com)
-- PropellerAds (propellerads.com)
-- Clickadu (clickadu.com)
-- TrafficStars (trafficstars.com)
-- iMonetizeIt (imonetizeit.com)
-- Adverticals (adverticals.com)
-- TrafficInMedia (trafficinmedia.com)
-- SunDesire Media (sundesiremedia.com)
-- Excellerate (excellerate.com)
-```
-
-**What happens:**
-1. **Imports the existing campaign** from SmartLead — downloads all current leads and blacklists their domains (no one gets emailed twice)
-2. **Scrapes inxy.io** to understand the product being offered
-3. **Enriches example companies** (Adsterra, PropellerAds, etc.) via Apollo — discovers which search keywords and industries these companies appear under. This teaches the system what "affiliate network" looks like in Apollo's data
-4. **Searches Apollo** for more companies matching those keywords — finds other affiliate networks you haven't contacted yet
-5. **Scrapes and classifies each one** — reads each website to confirm: is this actually a CPA/CPL/RevShare affiliate network that connects advertisers with affiliates? Or just an ad network that doesn't fit?
-6. **Extracts decision-maker contacts** at verified target companies, deduplicates against the existing campaign leads
-7. **Pushes only new contacts** to the same campaign + sends a test email to your inbox
-8. **You preview and activate**
-
-The system remembers what worked: keywords that found the most targets in previous runs are tried first, companies already found are skipped, Apollo page offsets are preserved (no wasted credits re-fetching the same results).
-
-### More ways to launch
-
-**New segment within an existing project** — you already have a project for your product, but want to target a different vertical:
-```
-/launch project=easystaff segment=LENDING geo=UK
-```
-Reuses the approved offer (skips extraction). Generates new filters for LENDING companies in UK. Creates a separate SmartLead campaign with different email accounts.
-
-**From a one-liner:**
-```
-/launch "We sell payroll software for SMBs in US and UK"
-```
-Full pipeline from scratch — Claude figures out the offer from your description.
+**Two moments where you decide:** strategy approval (step 3) and campaign activation (step 7). Everything in between is autonomous.
 
 ---
 
-## Setup
+### After launch
 
-### Install
+- **Add more contacts** to a running campaign: `gather 50 more`
+- **New segment** within an existing project: `/launch project=easystaff segment=LENDING geo=UK`
+- **Append to any SmartLead campaign** (even manually created ones): `/launch campaign=3070919 kpi=+100` — paste the campaign URL and describe what you want. The system deduplicates against existing leads automatically.
 
-```bash
-git clone https://github.com/impecablemee/gtm-mcp.git
-cd gtm-mcp
-cp .env.example .env    # fill in your API keys
-```
-
-Open Claude Code in this directory — `.mcp.json` auto-discovers the server. `uv run` handles venv + deps automatically.
-
-### Configure `.env`
-
-```bash
-# Required
-GTM_MCP_APOLLO_API_KEY=your_apollo_key        # apollo.io → Settings → API Keys
-GTM_MCP_SMARTLEAD_API_KEY=your_smartlead_key  # smartlead.ai → Settings → API
-
-# Your email — receives test emails before campaign activation
-GTM_MCP_USER_EMAIL=you@company.com
-
-# Optional — improves scraping success rate
-GTM_MCP_APIFY_PROXY_PASSWORD=                 # apify.com → Proxy → Password
-
-# Optional — LinkedIn outreach
-GTM_MCP_GETSALES_API_KEY=
-GTM_MCP_GETSALES_TEAM_ID=
-
-# Optional — Google Sheets export
-GOOGLE_SERVICE_ACCOUNT_JSON=
-GOOGLE_SHARED_DRIVE_ID=
-```
-
-### Run
-
-```bash
-claude    # open Claude Code in the gtm-mcp directory
-# then type:
-/launch https://yourcompany.com SaaS companies in US
-```
+---
 
 ## Architecture
 
 ```
-Claude Code ──stdio──> gtm-mcp server (49 tools)
+Claude Code ──stdio──> gtm-mcp (49 tools, 0 LLM calls)
                             |
                   +---------+---------+
                   v         v         v
@@ -257,9 +141,10 @@ Claude Code ──stdio──> gtm-mcp server (49 tools)
               (search)  (campaigns) (LinkedIn)
 ```
 
-Claude Code does all the reasoning using domain knowledge encoded as skills.
+Zero LLM calls inside the toolkit. Claude Code does all the reasoning using domain knowledge encoded as skills.
 
-**Tools** (`src/gtm_mcp/`): Thin API wrappers. Only data access
+**Tools** (`src/gtm_mcp/`): Thin API wrappers. Only data access.
+
 **Skills** (`.claude/skills/`): Domain knowledge in markdown — classification rules, email writing rules, filter strategies. Claude reads these and reasons.
 
 **Commands** (`.claude/commands/`): The `/launch` command — orchestrates the full pipeline.
@@ -283,6 +168,8 @@ Claude Code does all the reasoning using domain knowledge encoded as skills.
 - **Max 200 Apollo credits** per run (default, overridable)
 - **100 verified contacts** KPI target (default, overridable)
 - **Plain text emails**, no tracking, Mon-Fri 9-18 target timezone
+
+---
 
 ## Tools (49)
 
@@ -375,6 +262,8 @@ Claude Code does all the reasoning using domain knowledge encoded as skills.
 |------|-------------|
 | `normalize_company_name` | Strip legal suffixes (Inc, LLC, Ltd, GmbH, etc.) |
 
+---
+
 ## Data Storage
 
 All project data in `~/.gtm-mcp/projects/<slug>/`:
@@ -397,6 +286,21 @@ All project data in `~/.gtm-mcp/projects/<slug>/`:
                 ├── sequence.yaml
                 └── replies.json
 ```
+
+---
+
+## Email Infrastructure
+
+Before sending cold emails, you need separate sending domains and inboxes — **never send cold outreach from your primary domain** (Google/Microsoft will flag it as spam and you'll stop receiving normal business emails).
+
+What you need:
+- **5+ lookalike domains** (e.g., `acme-team.com`, `getacme.com`) — ~$10/domain/year on [Namecheap](https://namecheap.com)
+- **2 inboxes per domain** via [Google Workspace](https://workspace.google.com)
+- **Connect all inboxes to [SmartLead](https://smartlead.ai)** and run warmup (~2 weeks before you can start sending)
+- **Capacity:** ~100 emails/day per domain. 5 domains = ~500 emails/day
+- **Rotate every 4-6 weeks** — domains degrade over time as recipients mark emails as spam. Buy new ones, warm up, retire old ones.
+
+---
 
 ## Development
 
